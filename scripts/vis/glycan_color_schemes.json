@@ -1,0 +1,54 @@
+{
+    "snfg_colors": {
+        "pymol": {
+            "MAN": "green",
+            "BMA": "green", 
+            "GLC": "blue",
+            "GAL": "yellow",
+            "A2G": "yellow",
+            "GUL": "orange",
+            "NAG": "blue",
+            "NDG": "blue",
+            "FUC": "red",
+            "SIA": "magenta",
+            "XYL": "orange",
+            "ALL": "purple",
+            "ALT": "pink",
+            "RHA": "pink",
+            "ARA": "green",
+            "RIB": "blue"
+        },
+        "vmd": {
+            "MAN": "7",
+            "BMA": "7",
+            "GLC": "0", 
+            "GAL": "4",
+            "A2G": "4",
+            "GUL": "3",
+            "NAG": "0",
+            "NDG": "0",
+            "FUC": "1",
+            "SIA": "6",
+            "XYL": "9",
+            "ALL": "10",
+            "ALT": "8",
+            "RHA": "11",
+            "ARA": "12",
+            "RIB": "13"
+        }
+    },
+    "color_intensity_schemes": {
+        "pymol": {
+            "blue_gradient": ["lightblue", "blue", "darkblue", "navy"],
+            "green_gradient": ["lightgreen", "green", "darkgreen", "forest"],
+            "red_gradient": ["lightpink", "red", "darkred", "maroon"],
+            "yellow_gradient": ["lightyellow", "yellow", "orange", "darkorange"]
+        },
+        "vmd": {
+            "blue_gradient": ["14", "0", "15", "16"],
+            "green_gradient": ["17", "7", "18", "19"], 
+            "red_gradient": ["20", "1", "21", "22"],
+            "yellow_gradient": ["23", "4", "3", "24"]
+        }
+    }
+}
