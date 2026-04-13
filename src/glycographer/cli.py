@@ -65,4 +65,3 @@ def main(argv: list[str] | None = None) -> int:
         return validate_project(root)
 
     parser.error(f"Unsupported command: {args.command}")
-    return 2
