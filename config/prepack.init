@@ -1,0 +1,24 @@
+# For running the GlycanDock "Stage 0" prepacking algorithm
+# before execution of the entire protocol. Still requires
+# the following to be specified as additional inputs besides
+# those listed here:
+
+# -in:file:s complex.pdb
+# -in:file:native crystal_complex.pdb # (optional)
+
+-include_sugars
+-maintain_links
+-alternate_3_letter_codes pdb_sugar
+-auto_detect_glycan_connections
+-write_glycan_pdb_codes
+
+-nstruct 1
+-ex1
+-ex2
+-ex3
+-ex4
+-ex1aro
+-ex2aro
+
+-carbohydrates:glycan_dock:prepack_only true
+-docking:partners A_X
