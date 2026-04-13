@@ -1,0 +1,28 @@
+# Standard Workflow for Glycan FragMapping
+- Generate a uniform grid of sampling coordinates within a shell superimposed onto the surface of a putative binding site:
+    - Inputs:
+        - Receptor structure in pdb format <receptor.pdb>
+    - Outputs:
+        - Sampling coordinate points in xyz and pseudoatom pdb format <sampling_grid.xyz> <sampling_grid.pdb>
+- Execute an extended-sampling grid box docking simulation between a query receptor and glycan candidates:
+    - Inputs:
+        - Receptor structure in pdb format <receptor.pdb>
+        - Sampling coordinate points in pdb format <sampling_grid.pdb>
+        - Any queried glycan sequence in IUPAC format <glycoligand_queries.iupac>
+    - Outputs:
+        - Ensembles of scored GlycanDock simulations between the receptor and each glycan / glycan fragment </docking/frag1/rec_frag1_complex_*.pdb, etc.>
+        - Rosetta score files summarizing the output statistics <scores.sc>
+- Construct volumetric maps for binding hotspot identification:
+    - Inputs:
+        - Scored docked complex poses from Rosetta <rec_frag_complex_*.pdb>
+    - Outputs:
+        - Volumetric maps of interaction energy, residue contacts, atomic number density, etc. in dx format <rec_frag_energymap.dx>
+- Visualize maps with PyMOL or VMD:
+    - Inputs:
+        - Receptor structure in pdb format <receptor.pdb>
+        - Any known crystal ligand pose in pdb format <crystal_ligand.pdb>
+        - Volumetric maps in dx format <rec_frag_energymap.dx>
+    - Outputs:
+        - Visualization session files <rec_frag_vis.pse> <rec_frag_vis.vmd>
+        - Isosurface coordinates <rec_frag_energymap_isolevel_n.xyz>
+        - Rendered images <rec_frag_isomap_vis.png>
