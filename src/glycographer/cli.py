@@ -31,7 +31,7 @@ def init_project(root: Path) -> int:
 
 
 def validate_project(root: Path) -> int:
-    missing = [str(rel_path) for rel_path in REQUIRED_DIRS if not (root / rel_path).exists()]
+    missing = [rel_path.as_posix() for rel_path in REQUIRED_DIRS if not (root / rel_path).exists()]
     if missing:
         print("Missing required paths:")
         for path in missing:

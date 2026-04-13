@@ -26,7 +26,7 @@ class CLITests(unittest.TestCase):
     def test_validate_passes_after_init(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            cli.init_project(root)
+            self.assertEqual(cli.init_project(root), 0)
             result = cli.validate_project(root)
             self.assertEqual(result, 0)
 
