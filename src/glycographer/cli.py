@@ -61,7 +61,4 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "init":
         return init_project(root)
-    if args.command == "validate":
-        return validate_project(root)
-
-    parser.error(f"Unsupported command: {args.command}")
+    return validate_project(root)
