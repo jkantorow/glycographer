@@ -1,6 +1,8 @@
-# glycographer
+# Glycographer
+## 3D receptor-glycoligand binding affinity landscape generation through fragment-based grid docking and volumetric characterization
+![glycographer_example](doc/img/glycog_example_1k9i.png)
 
-Simulation tools and pipeline for generating receptor-glycoligand binding affinity maps powered by PyRosetta.
+The large size and structural complexity of most glycans and an emphasis on residue-dependent binding preference observed frequently in glycan-binding targets lends itself well to fragment-based molecular docking simulation; however, standard docking workflows are often unsuitable for accurately representing glycosidic torsions. Rosetta's GlycanDock protocol provides a significantly more robust approach to modeling and sampling receptor-glycoligand interactions, but is only intended for pose refinement and not de novo pose prediction. **Here, we provide a pipeline for mapping per-glycan fragment and per-glycan residue interactions in order to quantify the full binding-energy landscape between a queried receptor-glycan interaction.** Mapping per-fragment/residue glycan interaction energies over a putative target binding site shows detailed insight into possible glycan-binding orientation, the spatial dependence and relative magnitude of glycan residue binding preference between a range of queried glycans and a queried target, and design strategies tailored towards target binding optimization. Additionally, the volumetric data generated through GlycoMap is well suited for machine learning model training for spatial binding prediciton across a range of similar target structures.
 
 ## Goal
 
