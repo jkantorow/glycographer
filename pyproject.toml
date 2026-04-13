@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glycographer"
+version = "0.1.0"
+description = "Simulation tools and pipeline scaffolding for receptor-glycoligand binding affinity maps."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "glycographer contributors" }]
+dependencies = []
+
+[project.scripts]
+glycographer = "glycographer.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
