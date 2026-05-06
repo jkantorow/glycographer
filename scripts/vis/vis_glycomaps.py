@@ -28,7 +28,7 @@ from scripts.vis.glycolors import (
     glycolor_by_magnitude,
     atomcolor_by_magnitude
 )
-from dat.mapping import VolMap
+from glycographer.mapping import VolMap
 
 def map_data_from_filename(filename: str) -> Dict:
     '''
