@@ -23,7 +23,7 @@ from scripts.vis.glycolors import (
     glycolor_by_magnitude,
     atomcolor_by_magnitude
 )
-from dat.mapping import VolMap
+from glycographer.mapping import VolMap
 
 def parse_config(configfile: str) -> Dict:
     ''' Get plotting data from input config file. '''
