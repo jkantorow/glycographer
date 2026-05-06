@@ -48,7 +48,8 @@ def map_data_from_filename(filename: str) -> Dict:
     resnames = [item.upper() for item in parsed if item.upper() in gly_pdbs]
     maptype = [item for item in parsed if item in map_types]
     if len(maptype) > 1:
-        raise Warning(f'Warning: multiple maptype keywords detected in {os.path.abspath(filename)}.')
+        print(f'Warning: multiple maptype keywords detected in {os.path.abspath(filename)}. Assuming first encountered keyword is correct.')
+        #raise Warning(f'Warning: multiple maptype keywords detected in {os.path.abspath(filename)}.')
     atomname = [item for item in parsed if item.startswith(gly_elems)] if maptype[0] == 'count' else None
 
     map_metadata['name'] = parsed[0]
