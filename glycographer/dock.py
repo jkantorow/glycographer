@@ -42,7 +42,7 @@ class GlycanDockEnsemble:
     _pose_dir: os.PathLike = field(default=None, init=False)
     _ensemble_path: os.PathLike = field(default=None, init=False)
     _ensemble_file: str = field(default=None, init=False)
-    clusters: Dict = field(default=None, init=False)
+    _clusters: Dict = field(default=None, init=False)
 
     def __post_init__(self):
         '''Initialize derived attributes after dataclass initialization.'''
@@ -237,7 +237,7 @@ class GlycanDockEnsemble:
                 for model_id in members:
                     self.scoredata.loc[model_id, 'cluster_id'] = None
 
-        self.clusters = relevant_clusters
+        self._clusters = relevant_clusters
 
         return relevant_clusters
 
