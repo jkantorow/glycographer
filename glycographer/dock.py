@@ -1,3 +1,7 @@
+'''
+Dataclass for managing a GlycanDocking run between a receptor and glycoligand
+'''
+
 from dataclasses import dataclass, field
 from typing import Tuple, Dict, List
 import json
@@ -16,10 +20,6 @@ from pyrosetta.rosetta.protocols.rigid import RigidBodyRandomizeMover, partner_d
 from pyrosetta.rosetta.protocols.docking import setup_foldtree
 from pyrosetta.rosetta.protocols.ligand_docking import StartFrom
 from pyrosetta.rosetta.protocols.glycan_docking import GlycanDockProtocol
-
-'''
-Dataclass for managing a GlycanDocking run between a receptor and glycoligand
-'''
 
 @dataclass
 class GlycanDockEnsemble:
