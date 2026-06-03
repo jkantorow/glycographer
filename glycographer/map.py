@@ -265,9 +265,8 @@ class VolMap(GlycanDockEnsemble):
 class EnergyMapper(GlycanDockEnsemble):
     '''
     Object for extracting data from a GlycanDockEnsemble instance
-    and calculating the volumetric binding energy landscape.
+    and calculating the volumetric interaction energy landscape.
     '''
-    glycan_dock_ensemble: GlycanDockEnsemble = None
     voxel_size: float = 1.0
     padding: float = 5.0
     universe: mda.Universe = field(default=None, init=False)
@@ -276,18 +275,9 @@ class EnergyMapper(GlycanDockEnsemble):
     origin: np.ndarray = field(default=None, init=False)
     _atom_mappings: Dict = field(default=None, init=False)
 
-    def __post_init__(self):
-        '''Initialize metadata from the ensemble.'''
-        if self.glycan_dock_ensemble:
-            # Inherit metadata from the ensemble
-            self.runtag = self.glycan_dock_ensemble.runtag
-            self.recname = self.glycan_dock_ensemble.recname
-            self.ligname = self.glycan_dock_ensemble.ligname
-            self.lig_iupac = self.glycan_dock_ensemble.lig_iupac
-
     def _load_ensemble(self):
         '''Load the ensemble into MDAnalysis universe.'''
-        ensemble_file = self.glycan_dock_ensemble.get_ensemble_file()
+        ensemble_file = self.get_ensemble_file()
         self.universe = mda.Universe(ensemble_file)
         print(f'Loaded {ensemble_file} with {len(self.universe.trajectory)} frames')        
 
@@ -456,7 +446,7 @@ class EnergyMapper(GlycanDockEnsemble):
         voxel_radius = self.voxel_size * np.sqrt(3) / 2
 
         # Initialize all voxel values as 0:
-        energy_map = np.zeros(grid_points.shape[0])
+        voxel_values = np.zeros(grid_points.shape[0])
 
         # Process energy calculation for each atom in each voxel:
         for i, point in enumerate(grid_points):
@@ -477,7 +467,7 @@ class EnergyMapper(GlycanDockEnsemble):
                 # Get interaction_energy scores for models within this voxel:
                 model_scores = []
                 for model_num in unique_models_in_voxel:
-                    score_val = self.glycan_dock_ensemble.scoredata.loc[model_num, 'interaction_energy']
+                    score_val = self.scoredata.loc[model_num, 'interaction_energy']
                     if pd.notna(score_val):
                         model_scores.append(score_val)
 
@@ -488,14 +478,15 @@ class EnergyMapper(GlycanDockEnsemble):
 
                     # sum all interaction energy scores and scale 
                     # by the fraction of voxel models vs ensemble models:
-                    energy_map[i] = np.min(quality_scores) if quality_scores else 0.0
+                    voxel_values[i] = np.min(quality_scores) if quality_scores else 0.0
                     if debug and len(quality_scores) > 3:
                         print(f'Model scores found for {unique_models_in_voxel} in voxel {i}: {model_scores}')
                         print(f'Quality scores (score < 0) found in voxel {i}: {quality_scores}')
                         print(f'Voxel value assigned: {np.min(quality_scores)}')
 
+        # This seems entirely unnecessary:
         maps = {}
-        maps['energy_min'] = energy_map
+        maps['energy_min'] = voxel_values
         self.maps = maps
 
         # Return map data as VolMap object instances:
@@ -503,19 +494,20 @@ class EnergyMapper(GlycanDockEnsemble):
         for map_id, map_data in maps.items():
             map_data_3d = map_data.reshape(self.grid_shape)
             volmap = VolMap.from_mapper(
-                name=f'{self.runtag}_{map_id}',
+                name=f'{self.in_complex_pdb.replace('.pdb', '')}_{self._n_poses}p_{map_id}_volmap',
                 maptype=map_id,
-                runtag=self.runtag,
-                recname=self.recname,
-                ligname=self.ligname,
-                lig_iupac=self.lig_iupac,
+                runtag=self.runtag, # Need edit
+                recname=self.recname, # Need edit
+                ligname=self.ligname, # Need edit
+                lig_iupac=self.lig_iupac, # Need edit
                 grid_coords=self.grid_coords,
                 grid_values=map_data_3d,
                 spacing=self.voxel_size,
             )
             volmaps[map_id] = volmap
 
-        # Optionally include per-atom count maps
+        # May want to remove this from the EnergyMapper class since
+        # it should be its own mapping class:
         if include_atom_counts:
             print('Generating per-atom count maps...')
             atom_count_maps = self._map_per_atom_counts(debug=debug)
