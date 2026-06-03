@@ -8,6 +8,9 @@ import MDAnalysis as mda
 import numpy as np
 import pandas as pd
 
+import pymol
+from pymol import cmd
+
 from pyrosetta import init, pose_from_pdb, Vector1
 from pyrosetta.rosetta.protocols.rigid import RigidBodyRandomizeMover, partner_downstream
 from pyrosetta.rosetta.protocols.docking import setup_foldtree
@@ -25,7 +28,7 @@ class GlycanDockEnsemble:
     the output of a GlycanDock sampling simulation.
     '''
     run_type: str = field(default='probe')
-    complex_pdb: str = None
+    in_complex_pdb: str = None
     pose_files: List[str] = None
     grid_pdb: str = None
     scoredata: pd.DataFrame = None
@@ -43,8 +46,8 @@ class GlycanDockEnsemble:
 
     def __post_init__(self):
         '''Initialize derived attributes after dataclass initialization.'''
-        if self.complex_pdb:
-            self._complex_path = os.path.abspath(self.complex_pdb)
+        if self.in_complex_pdb:
+            self._complex_path = os.path.abspath(self.in_complex_pdb)
         if self.grid_pdb:
             self._grid_path = os.path.abspath(self.grid_pdb)
 
@@ -89,7 +92,7 @@ class GlycanDockEnsemble:
         # Parse each pose file to extract data:
         for i, file in enumerate(self.pose_files):
             model_num = i + 1
-            scoredata.loc[model_num, 'pose_file'] = file
+            scoredata.loc[model_num, 'pose_file'] = os.path.abspath(file)
             
             with open(file, 'r') as f:
                 lines = f.readlines()
@@ -112,7 +115,7 @@ class GlycanDockEnsemble:
         self.scoredata = scoredata
         return self
 
-    def to_pdb(self, outname=None):
+    def to_pdb(self, outname=None, include_receptor=False):
         '''
         Write GlycanDock run pose files to a multimodel pdb
         ensemble.
@@ -121,6 +124,10 @@ class GlycanDockEnsemble:
         -----------
         outname : str, optional
             Output filename. If None, creates one from runtag
+
+        include_receptor : bool, optional
+            Output receptor coordinates along with ligand
+            coordinates to ensemble pdb
             
         Returns:
         --------
@@ -130,7 +137,7 @@ class GlycanDockEnsemble:
             raise ValueError(f'No pose data found in object {self}')
         
         if outname is None:
-            outname = f'{self.runtag}_ensemble.pdb' if self.runtag else 'ensemble.pdb'
+            outname = f'{self.in_complex_pdb.replace('pdb', '')}_ensemble.pdb'
         
         ensemble_lines = []
 
@@ -144,6 +151,9 @@ class GlycanDockEnsemble:
 
                 # Extract only glycoligand data:
                 for line in lines:
+                    if include_receptor:
+                        if line.startswith(('ATOM', 'HETATM')) and line[21] == self._rec_chain_id:
+                            ensemble_lines.append(line)
                     if line.startswith(('ATOM', 'HETATM')) and line[21] == self._lig_chain_id:
                         ensemble_lines.append(line)
 
@@ -169,7 +179,7 @@ class GlycanDockEnsemble:
             raise ValueError(f'No score data found in glycan dock run {self}')
         
         if outname is None:
-            outname = f'{self.runtag}_scores.csv' if self.runtag else 'scores.csv'
+            outname = f'{self.in_complex_pdb.replace('pdb', '')}_scores.csv'
             
         self.scoredata.to_csv(outname)
         return outname
@@ -181,12 +191,9 @@ class GlycanDockEnsemble:
         the scoredata dataframe. Only clusters with at least
         min_cluster_size members are considered relevant.
         '''
-        import pymol
-        from pymol import cmd
-
         if not self._ensemble_file:
-            self.to_pdb()
-        ens_name = os.path.basename(os.path.splitext(self._ensemble_file)[0])
+            print('Cannot cluster poses until ensemble file is created.')
+        ens_name = os.path.basename(self._ensemble_file.replace('.pdb', ''))
         rmsd_sel = f'{ens_name} and not elem H'
         self.scoredata['cluster_id'] = None
 
@@ -301,5 +308,5 @@ class GlycanDockEnsemble:
     def get_ensemble_file(self):
         '''Get the path to the ensemble file, creating it if necessary.'''
         if self._ensemble_file is None or not os.path.exists(self._ensemble_file):
-            self._ensemble_file = self.to_pdb()
+            print('No ensemble file has been generated.')
         return self._ensemble_file
