@@ -15,264 +15,19 @@ import os
 from glycographer.dock import GlycanDockEnsemble
 
 @dataclass
-class VolMap(GlycanDockEnsemble):
-    '''
-    Object for reading, storing, and writing voxel grid data
-    along with relevant statistical analyses.
-    '''
-    name: str = None
-    maptype: str = None
-    origin: Tuple = None
-    spacing: List = None
-    dims: List = None
-    data: np.ndarray = None
-    data3d: np.ndarray = None
-    mapper: object = None
-    resnames: List[str] = field(default_factory=list)
-    
-    # Derived attributes computed from data
-    nzvals: np.ndarray = field(default=None, init=False)
-
-    def __post_init__(self):
-        '''Initialize derived attributes after dataclass initialization.'''
-        self._update_derived_data()
-
-    def _update_derived_data(self):
-        '''Update derived data arrays when primary data changes.'''
-        if self.data is not None:
-            self.nzvals = np.nonzero(self.data)[0]
-        elif self.data3d is not None:
-            self.data = np.ravel(self.data3d)
-            self.nzvals = np.flatnonzero(self.data3d)
-
-    def get_min_voxel_val(self):
-        '''Get minimum occupied voxel value in the map.'''
-        occupied = self.data[self.data != 0]
-        return np.min(occupied) if occupied.any() else None
-
-    def get_max_voxel_val(self):
-        '''Get maximum occupied voxel value in the map.'''
-        occupied = self.data[self.data != 0]
-        return np.max(occupied) if occupied.any() else None
-
-    def get_avg_voxel_val(self):
-        '''Get mean value of all data points.'''
-        occupied = self.data[self.data != 0]
-        return np.mean(occupied) if occupied.any() else None
-
-    @classmethod
-    def from_mapper(cls, name, maptype, recname, ligname,
-                    lig_iupac, grid_coords, grid_values, spacing, runtag=None):
-        '''
-        Create a VolMap from calculated grid data contained in a
-        Mapper class instance.
-            
-        Returns:
-        --------
-        VolMap : New VolMap instance
-        '''
-        dims = list(grid_values.shape)
-        origin = [grid_coords[0][0,0,0], grid_coords[1][0,0,0], grid_coords[2][0,0,0]]
-        spacing_vec = [[spacing, 0, 0], [0, spacing, 0], [0, 0, spacing]]
-        
-        volmap = cls(
-            name=name,
-            maptype=maptype,
-            runtag=runtag,
-            recname=recname,
-            ligname=ligname,
-            lig_iupac=lig_iupac,
-            origin=origin,
-            spacing=spacing_vec,
-            dims=dims,
-            data3d=grid_values
-        )
-        # Update derived data after initialization
-        volmap._update_derived_data()
-        return volmap
-    
-    def read_dx(self, dx_file: str):
-        '''
-        Construct the VolMap data object from an input dx file.
-        '''
-
-        # Cache the filepath:
-        self._dx_path = os.path.abspath(dx_file)
-
-        # Define map name from dx file if one is not already specified:
-        if self.name == '':
-            self.name = os.path.basename(dx_file.replace('.dx', ''))
-        if self.data or self.data3d:
-            print(f'Warning: Map data already exists for map object {self}')
-            print(f'Preexisting map data will be overwritten by provided dx data.')
-            self.data = []
-            self.data3d = []
-
-        with open(dx_file, 'r') as f:
-            lines = f.readlines()
-
-        data = []
-        spacing = []
-        data_started = False
-
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                # I would like to change this so that
-                # dx file constructed from the core
-                # logic outputs maptype, receptor,
-                # and resname(s) data after the #
-                # header to be parsed into the class.
-                continue
-
-            if line.startswith('object 1 class gridpositions counts'):
-                fields = line.split()
-                self.dims = [int(fields[5]), int(fields[6]), int(fields[7])]
-            elif line.startswith('origin'):
-                fields = line.split()
-                self.origin = [float(fields[1]), float(fields[2]), float(fields[3])]
-            elif line.startswith('delta'):
-                fields = line.split()
-                spacing.append([float(fields[1]), float(fields[2]), float(fields[3])])
-            elif 'data follows' in line and 'object 3 class array' in line:
-                data_started = True
-                continue
-            elif data_started and not line.startswith(('attribute', 'object', 'component')):
-                fields = line.split()
-                for val in fields:
-                    try:
-                        data.append(float(val))
-                    except ValueError:
-                        continue
-            
-        if not data:
-            raise ValueError(f'Warning: No numeric data found in map file {dx_file}')
-        
-        data = np.array(data)
-        self.data = data
-        self.spacing = spacing
-
-        expected_length = np.prod(self.dims)
-        if len(data) != expected_length:
-            print(f'Warning: Expected {expected_length} total values; got {len(data)} instead.')
-            if len(data) < expected_length:
-                data = np.pad(data, (0, expected_length - len(data)), 'constant')
-            else:
-                data = data[:expected_length]
-
-        self.data3d = data.reshape(self.dims)
-        self._update_derived_data()
-
-        return self
-
-    def to_dx(self, filename=None, n_cols=3):
-        '''
-        Write the VolMap data to a DX format file.
-        
-        Parameters:
-        -----------
-        filename : str, optional
-            Output filename. If None, uses map name
-        n_cols : int
-            Number of values per line in output file
-            
-        Returns:
-        --------
-        str : Path to written file
-        '''
-        if filename is None:
-            filename = f'{self.name}.dx'
-            
-        if self.data3d is None:
-            raise ValueError('No 3D data available to write')
-        
-        nx, ny, nz = self.dims
-        
-        # Extract spacing from spacing vectors
-        if isinstance(self.spacing[0], (list, np.ndarray)):
-            dx = self.spacing[0][0]
-            dy = self.spacing[1][1] 
-            dz = self.spacing[2][2]
-        else:
-            # Assume uniform spacing
-            dx = dy = dz = self.spacing[0] if self.spacing else 1.0
-
-        with open(filename, 'w') as f:
-            # Header with metadata
-            f.write(f'# {self.maptype} map for {self.recname}\n')
-            if self.resnames:
-                f.write(f'# Residues: {", ".join(self.resnames)}\n')
-            f.write(f'object 1 class gridpositions counts {nx} {ny} {nz}\n')
-            f.write(f'origin {self.origin[0]:.6f} {self.origin[1]:.6f} {self.origin[2]:.6f}\n')
-            f.write(f'delta {dx:.6f} 0.000000 0.000000\n')
-            f.write(f'delta 0.000000 {dy:.6f} 0.000000\n')
-            f.write(f'delta 0.000000 0.000000 {dz:.6f}\n')
-            f.write(f'object 2 class gridconnections counts {nx} {ny} {nz}\n')
-            f.write(f'object 3 class array type double rank 0 items {nx*ny*nz} data follows\n')
-            
-            # Data - DX format expects Z to vary fastest, then Y, then X
-            value_count = 0
-            for i in range(nx):
-                for j in range(ny):
-                    for k in range(nz):
-                        if value_count % n_cols == 0 and value_count > 0:
-                            f.write('\n')
-                        f.write(f'{self.data3d[i,j,k]:.6f} ')
-                        value_count += 1
-            
-            # Ensure file ends with newline; always write a newline so the
-            # following attribute lines start on their own line. This prevents
-            # the attribute string from being appended to the last data line
-            # when the data count is an exact multiple of n_cols.
-            f.write('\n')
-            f.write('attribute "dep" string "positions"\n')
-            f.write('object "density" class field\n')
-
-        # Cache the filepath:
-        self._dx_path = os.path.abspath(filename)
-
-        return filename
-    
-    def to_json(self, filename=None):
-        '''Export map metadata and statistics to JSON.'''
-        if filename is None:
-            filename = f'{self.name}_metadata.json'
-            
-        metadata = {
-            'name': self.name,
-            'maptype': self.maptype,
-            'recname': self.recname,
-            'resnames': self.resnames,
-            'origin': self.origin.tolist() if self.origin is not None else None,
-            'dims': self.dims,
-            'spacing': self.spacing,
-            'statistics': {
-                'min_val': self.get_min_voxel_val(),
-                'max_val': self.get_max_voxel_val(),
-                'mean': self.get_avg_voxel_val()
-            }
-        }
-        
-        with open(filename, 'w') as f:
-            json.dump(metadata, f, indent=2)
-
-        # Cache file path:
-        self._json_path = os.path.abspath(filename)
-            
-        return filename
-
-@dataclass
-class EnergyMapper(GlycanDockEnsemble):
+class GlycanEnsembleMapper(GlycanDockEnsemble):
     '''
     Object for extracting data from a GlycanDockEnsemble instance
     and calculating the volumetric interaction energy landscape.
     '''
+    maptype: str = field(default='energy_min')
     voxel_size: float = 1.0
     padding: float = 5.0
     universe: mda.Universe = field(default=None, init=False)
     grid_coords: np.ndarray = field(default=None, init=False)
     grid_shape: Tuple = field(default=None, init=False)
     origin: np.ndarray = field(default=None, init=False)
+    data: np.ndarray = field(default=None, init=False)
     _atom_mappings: Dict = field(default=None, init=False)
 
     def _load_ensemble(self):
@@ -360,77 +115,7 @@ class EnergyMapper(GlycanDockEnsemble):
         
         print(f'Grid dimensions: {nx} x {ny} x {nz}')
 
-    def _map_per_atom_counts(self, debug=False):
-        '''
-        Generate per-atom count maps for each unique heavy atom in the ligand.
-        Returns a dictionary of VolMap objects, one for each unique atom.
-        '''
-        if not self._atom_mappings:
-            self._build_atom_mappings()
-        if not self.grid_coords:
-            self._setup_grid()
-
-        grid_points = np.column_stack([coords.ravel() for coords in self.grid_coords])
-        tree = cKDTree(self._atom_mappings['coords'])
-        voxel_radius = self.voxel_size * np.sqrt(3) / 2
-        
-        # Get unique atom indices and names for creating maps
-        unique_atom_indices = self._atom_mappings['unique_atom_indices']
-        unique_atom_names = self._atom_mappings['unique_atom_names']
-        n_atoms_per_model = self._atom_mappings['n_heavy_atoms_per_model']
-        
-        # Initialize count maps for each unique atom
-        atom_count_maps = {}
-        for atom_idx, atom_name in zip(unique_atom_indices, unique_atom_names):
-            atom_count_maps[f'{atom_name}_{atom_idx}'] = np.zeros(grid_points.shape[0])
-            
-        print(f'Mapping counts for {len(unique_atom_indices)} unique heavy atoms')
-        
-        # Process each voxel
-        for i, point in enumerate(grid_points):
-            if i % 10000 == 0:
-                print(f'Per-atom mapping progress: {(i/len(grid_points))*100:.1f}%')
-
-            # Query voxel for atom coordinates within radius
-            atom_indices_in_voxel = tree.query_ball_point(point, voxel_radius)
-            
-            if atom_indices_in_voxel:
-                # Get model numbers and local atom indices for atoms in this voxel
-                models_in_voxel = self._atom_mappings['model_map'][atom_indices_in_voxel]
-                local_atom_indices = self._atom_mappings['local_index_map'][atom_indices_in_voxel]
-                
-                # Count occurrences of each atom type
-                for atom_idx, atom_name in zip(unique_atom_indices, unique_atom_names):
-                    # Convert atom_idx to local index (0-based within heavy atoms)
-                    local_heavy_atom_idx = np.where(unique_atom_indices == atom_idx)[0][0]
-                    
-                    # Count how many times this specific atom appears in the voxel
-                    count = np.sum(local_atom_indices == local_heavy_atom_idx)
-                    atom_count_maps[f'{atom_name}_{atom_idx}'][i] = count
-                    
-                    if debug and count > 0:
-                        print(f'Voxel {i}: Found {count} instances of atom {atom_name}_{atom_idx}')
-
-        # Convert to VolMap objects
-        volmaps = {}
-        for atom_key, count_data in atom_count_maps.items():
-            count_data_3d = count_data.reshape(self.grid_shape)
-            volmap = VolMap.from_mapper(
-                name=f'{self.runtag}_{atom_key}_count',
-                maptype=f'{atom_key}_count',
-                runtag=self.runtag,
-                recname=self.recname,
-                ligname=self.ligname,
-                lig_iupac=self.lig_iupac,
-                grid_coords=self.grid_coords,
-                grid_values=count_data_3d,
-                spacing=self.voxel_size,
-            )
-            volmaps[f'{atom_key}_count'] = volmap
-            
-        return volmaps
-
-    def map(self, debug=False, include_atom_counts=False):
+    def map(self, debug=False):
         '''
         Use the input docking run data to calculate
         voxel-wise interaction energy scaled by pose
@@ -484,33 +169,178 @@ class EnergyMapper(GlycanDockEnsemble):
                         print(f'Quality scores (score < 0) found in voxel {i}: {quality_scores}')
                         print(f'Voxel value assigned: {np.min(quality_scores)}')
 
-        # This seems entirely unnecessary:
-        maps = {}
-        maps['energy_min'] = voxel_values
-        self.maps = maps
+        self.data = voxel_values
+        return voxel_values
 
-        # Return map data as VolMap object instances:
-        volmaps = {}
-        for map_id, map_data in maps.items():
-            map_data_3d = map_data.reshape(self.grid_shape)
-            volmap = VolMap.from_mapper(
-                name=f'{self.in_complex_pdb.replace('.pdb', '')}_{self._n_poses}p_{map_id}_volmap',
-                maptype=map_id,
-                runtag=self.runtag, # Need edit
-                recname=self.recname, # Need edit
-                ligname=self.ligname, # Need edit
-                lig_iupac=self.lig_iupac, # Need edit
-                grid_coords=self.grid_coords,
-                grid_values=map_data_3d,
-                spacing=self.voxel_size,
-            )
-            volmaps[map_id] = volmap
+@dataclass
+class VolMap(GlycanEnsembleMapper):
+    '''
+    Object for reading, storing, and writing voxel grid data.
+    '''
+    map_id: str = None
+    spacing: List = None
+    dims: List = None
+    data3d : np.ndarray = field(default=None, init=False)
 
-        # May want to remove this from the EnergyMapper class since
-        # it should be its own mapping class:
-        if include_atom_counts:
-            print('Generating per-atom count maps...')
-            atom_count_maps = self._map_per_atom_counts(debug=debug)
-            volmaps.update(atom_count_maps)
+    def __post_init__(self):
+        if not self.map_id:
+            self.map_id = f'{self.run_id}_{self.maptype}'
+        self.data3d = self.data.reshape(self.grid_shape)
+        return super().__post_init__()
+    
+    def read_dx(self, dx_file: str):
+        '''
+        Construct the VolMap data object from an input dx file.
+        '''
 
-        return volmaps
+        # Cache the filepath:
+        self._dx_path = os.path.abspath(dx_file)
+
+        # Define map name from dx file if one is not already specified:
+        if not self.map_id:
+            self.map_id = os.path.basename(dx_file.replace('.dx', ''))
+        if self.data or self.data3d:
+            print(f'Warning: Map data already exists for map object {self}')
+            print(f'Preexisting map data will be overwritten by provided dx data.')
+            self.data = []
+            self.data3d = []
+
+        with open(dx_file, 'r') as f:
+            lines = f.readlines()
+
+        data = []
+        spacing = []
+        data_started = False
+
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                # I would like to change this so that
+                # dx file constructed from the core
+                # logic outputs maptype, receptor,
+                # and resname(s) data after the #
+                # header to be parsed into the class.
+                continue
+
+            if line.startswith('object 1 class gridpositions counts'):
+                fields = line.split()
+                self.dims = [int(fields[5]), int(fields[6]), int(fields[7])]
+            elif line.startswith('origin'):
+                fields = line.split()
+                self.origin = [float(fields[1]), float(fields[2]), float(fields[3])]
+            elif line.startswith('delta'):
+                fields = line.split()
+                spacing.append([float(fields[1]), float(fields[2]), float(fields[3])])
+            elif 'data follows' in line and 'object 3 class array' in line:
+                data_started = True
+                continue
+            elif data_started and not line.startswith(('attribute', 'object', 'component')):
+                fields = line.split()
+                for val in fields:
+                    try:
+                        data.append(float(val))
+                    except ValueError:
+                        continue
+            
+        if not data:
+            raise ValueError(f'Warning: No numeric data found in map file {dx_file}')
+        
+        data = np.array(data)
+        self.data = data
+        self.spacing = spacing
+
+        expected_length = np.prod(self.dims)
+        if len(data) != expected_length:
+            print(f'Warning: Expected {expected_length} total values; got {len(data)} instead.')
+            if len(data) < expected_length:
+                data = np.pad(data, (0, expected_length - len(data)), 'constant')
+            else:
+                data = data[:expected_length]
+
+        self.data3d = data.reshape(self.dims)
+        self._update_derived_data()
+
+        return self
+
+    def to_dx(self, filename=None, n_cols=3):
+        '''
+        Write the VolMap data to a DX format file.
+        
+        Parameters:
+        -----------
+        filename : str, optional
+            Output filename. If None, uses map name
+        n_cols : int
+            Number of values per line in output file
+            
+        Returns:
+        --------
+        str : Path to written file
+        '''
+        if filename is None:
+            filename = f'{self.map_id}.dx'
+            
+        if self.data3d is None:
+            raise ValueError('No 3D data available to write')
+        
+        nx, ny, nz = self.dims
+        
+        # Extract spacing from spacing vectors
+        if isinstance(self.spacing[0], (list, np.ndarray)):
+            dx = self.spacing[0][0]
+            dy = self.spacing[1][1] 
+            dz = self.spacing[2][2]
+        else:
+            # Assume uniform spacing
+            dx = dy = dz = self.spacing[0] if self.spacing else 1.0
+
+        with open(filename, 'w') as f:
+            # Header with metadata (need to add more detail)
+            f.write(f'# maptype {self.maptype}\n')
+            f.write(f'object 1 class gridpositions counts {nx} {ny} {nz}\n')
+            f.write(f'origin {self.origin[0]:.6f} {self.origin[1]:.6f} {self.origin[2]:.6f}\n')
+            f.write(f'delta {dx:.6f} 0.000000 0.000000\n')
+            f.write(f'delta 0.000000 {dy:.6f} 0.000000\n')
+            f.write(f'delta 0.000000 0.000000 {dz:.6f}\n')
+            f.write(f'object 2 class gridconnections counts {nx} {ny} {nz}\n')
+            f.write(f'object 3 class array type double rank 0 items {nx*ny*nz} data follows\n')
+            
+            # Data - DX format expects Z to vary fastest, then Y, then X
+            value_count = 0
+            for i in range(nx):
+                for j in range(ny):
+                    for k in range(nz):
+                        if value_count % n_cols == 0 and value_count > 0:
+                            f.write('\n')
+                        f.write(f'{self.data3d[i,j,k]:.6f} ')
+                        value_count += 1
+
+            f.write('\n')
+            f.write('attribute "dep" string "positions"\n')
+            f.write('object "density" class field\n')
+
+        # Cache the filepath:
+        self._dx_path = os.path.abspath(filename)
+        
+        return filename
+    
+    def to_json(self, filename=None):
+        '''Export map metadata to JSON.'''
+        if filename is None:
+            filename = f'{self.map_id}_metadata.json'
+            
+        metadata = {
+            'map_id': self.map_id,
+            'maptype': self.maptype,
+            'origin': self.origin.tolist() if self.origin is not None else None,
+            'dims': self.dims,
+            'spacing': self.spacing
+        }
+        
+        with open(filename, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        # Cache file path:
+        self._json_path = os.path.abspath(filename)
+        
+        return filename
