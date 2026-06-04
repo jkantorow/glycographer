@@ -1,3 +1,11 @@
+'''
+Functions for creating and rendering volume map visualizations in PyMOL.
+
+Each function can also be imported and used within a PyMOL session via the
+PyMOL run command:
+> run /path/to/glycographer/vis.py
+'''
+
 import colorsys
 import os
 from typing import Tuple
