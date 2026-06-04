@@ -28,6 +28,7 @@ class GlycanDockEnsemble:
     the output of a GlycanDock sampling simulation.
     '''
     run_type: str = field(default='probe')
+    run_id: str = field(default=None)
     in_complex_pdb: str = None
     pose_files: List[str] = None
     grid_pdb: str = None
@@ -76,6 +77,9 @@ class GlycanDockEnsemble:
         if not self._n_poses:
             self._n_poses = len(self.pose_files)
 
+        if not self.run_id:
+            self.run_id = f'{self.in_complex_pdb.replace('.pdb', '')}_{self.grid_pdb.replace('.pdb', '')}_{self._n_poses}p'
+
         # Use provided score names or default to standard ones:
         if score_names is None:
             score_names = self.STANDARD_SCORE_NAMES.copy()
@@ -99,6 +103,12 @@ class GlycanDockEnsemble:
 
             # Extract scores and metadata from pose file:
             for line in lines:
+                # Note: this only works for single residue glycoligands.
+                # For disaccharides and longer, each residue is stored
+                # on a separate line from branch tips until the reducing
+                # end residue. This is useful for scraping data for each
+                # resiude of a longer ligand, but doesn't immediately give
+                # us the full IUPAC of the glycoligand outright.
                 if not self.lig_iupac and line.startswith('->'):
                     # Extract IUPAC name and clean it
                     iupac_raw = line.split()[0]
@@ -137,7 +147,7 @@ class GlycanDockEnsemble:
             raise ValueError(f'No pose data found in object {self}')
         
         if outname is None:
-            outname = f'{self.in_complex_pdb.replace('pdb', '')}_ensemble.pdb'
+            outname = f'{self.run_id}_ensemble.pdb'
         
         ensemble_lines = []
 
@@ -179,7 +189,7 @@ class GlycanDockEnsemble:
             raise ValueError(f'No score data found in glycan dock run {self}')
         
         if outname is None:
-            outname = f'{self.in_complex_pdb.replace('pdb', '')}_scores.csv'
+            outname = f'{self.run_id}_scores.csv'
             
         self.scoredata.to_csv(outname)
         return outname
