@@ -7,7 +7,7 @@ from typing import Tuple, Dict, List
 import json
 import os
 
-from scipy.spacial import cKDTree
+from scipy.spatial import cKDTree
 import MDAnalysis as mda
 import numpy as np
 import pandas as pd
