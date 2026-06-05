@@ -195,9 +195,9 @@ class VolMap:
     values = None
     ensemble: GlycanDockEnsemble = None
     
-    _values_3d = field(default=None, init=False)
-    _dx_file = field(default=None, init=False)
-    _dx_path = field(default=None, init=False)
+    _values_3d: np.ndarray = field(default=None, init=False)
+    _dx_file: str = field(default=None, init=False)
+    _dx_path: str = field(default=None, init=False)
     
     @classmethod
     def from_dx(cls, dx_file: str):
