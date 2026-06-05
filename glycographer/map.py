@@ -6,14 +6,15 @@ receptor-glycoligand poses
 import os
 import json
 from dataclasses import dataclass, field
-from typing import Tuple, Dict
+from typing import TYPE_CHECKING, Tuple, Dict, List
 
 import MDAnalysis as mda
 from scipy.spatial import cKDTree
 import numpy as np
 import pandas as pd
 
-from glycographer.dock import GlycanDockEnsemble
+if TYPE_CHECKING:
+    from glycographer.dock import GlycanDockEnsemble
 
 @dataclass
 class Mapper:
@@ -21,7 +22,7 @@ class Mapper:
     Base class for building voxel-wise atom mappings from a GlycanDockEnsemble
     object
     '''
-    ensemble: GlycanDockEnsemble
+    ensemble: 'GlycanDockEnsemble'
     voxel_size: float = 1.0
     padding: float = 5.0
 
@@ -133,9 +134,9 @@ class IntEngMinMapper(Mapper):
         voxel-wise interaction energy scaled by pose
         count:
         '''
-        if not self._atom_mappings:
+        if self._atom_mappings is None:
             self._build_atom_mappings()
-        if not self._volmap_coords:
+        if self._volmap_coords is None:
             self._setup_grid()
 
         grid_points = np.column_stack([coords.ravel() for coords in self._volmap_coords])
@@ -188,12 +189,12 @@ class VolMap:
     '''
     map_id: str = None
     map_type: str = None
-    coords = None
-    spacing = None
-    shape = None
-    origin = None
-    values = None
-    ensemble: GlycanDockEnsemble = None
+    coords: np.ndarray = None
+    spacing: List = None
+    shape: List = None
+    origin: Tuple = None
+    values: np.ndarray = None
+    ensemble: 'GlycanDockEnsemble' = None
     
     _values_3d: np.ndarray = field(default=None, init=False)
     _dx_file: str = field(default=None, init=False)
@@ -217,6 +218,8 @@ class VolMap:
         spacing = []
         data_started = False
         map_type = None
+        shape = None
+        origin = None
 
         for line in lines:
             line = line.strip()
@@ -224,8 +227,8 @@ class VolMap:
                 continue
             if line.startswith('#'):
                 fields = line.split()
-                if fields[1] == 'map_type':
-                    map_type=fields[1]
+                if len(fields) >= 3 and fields[1] == 'map_type':
+                    map_type = fields[2]
             if line.startswith('object 1 class gridpositions counts'):
                 fields = line.split()
                 shape = [int(fields[5]), int(fields[6]), int(fields[7])]
@@ -246,9 +249,13 @@ class VolMap:
                     except ValueError:
                         continue
             
+        if shape is None:
+            raise ValueError(f'Could not read grid dimensions from map file {dx_file}')
+        if origin is None:
+            raise ValueError(f'Could not read origin from map file {dx_file}')
         if not values:
             raise ValueError(f'Warning: No numeric data found in map file {dx_file}')
-        expected_length = np.prod(shape)
+        expected_length = int(np.prod(shape))
         if len(values) != expected_length:
             print(f'Warning: Expected {expected_length} total values; got {len(values)} instead.')
             if len(values) < expected_length:
@@ -256,22 +263,21 @@ class VolMap:
             else:
                 values = values[:expected_length]
         
-        values = np.array(values)
+        values = np.asarray(values, dtype=float)
         _values_3d = values.reshape(shape)
 
-        volmap = cls(
-            map_id=map_id,
-            map_type=map_type,
-            #coords=coords,
-            spacing=spacing,
-            shape=shape,
-            origin=origin,
-            values=values,
-            #ensemble?,
-            _values_3d=_values_3d,
-            _dx_file=dx_file,
-            _dx_path=_dx_path
-        )
+        volmap = cls.__new__(cls)
+        volmap.map_id = map_id
+        volmap.map_type = map_type
+        volmap.coords = None
+        volmap.spacing = spacing
+        volmap.shape = shape
+        volmap.origin = np.asarray(origin, dtype=float)
+        volmap.values = values
+        volmap.ensemble = None
+        volmap._values_3d = _values_3d
+        volmap._dx_file = dx_file
+        volmap._dx_path = _dx_path
 
         return volmap
     
@@ -285,17 +291,18 @@ class VolMap:
                    [0, mapper.voxel_size, 0],
                    [0, 0, mapper.voxel_size]]
 
-        volmap = cls(
-            map_id=f'{mapper.ensemble.run_id}_{mapper._map_type}',
-            map_type=mapper._map_type,
-            coords=mapper._volmap_coords,
-            spacing=spacing,
-            shape=mapper._volmap_shape,
-            origin=mapper._volmap_origin,
-            values=mapper._volmap_values,
-            ensemble=mapper.ensemble,
-            _values_3d=mapper._volmap_values.reshape(mapper._volmap_shape)
-        )
+        volmap = cls.__new__(cls)
+        volmap.map_id = f'{mapper.ensemble.run_id}_{mapper._map_type}'
+        volmap.map_type = mapper._map_type
+        volmap.coords = mapper._volmap_coords
+        volmap.spacing = spacing
+        volmap.shape = mapper._volmap_shape
+        volmap.origin = mapper._volmap_origin
+        volmap.values = mapper._volmap_values
+        volmap.ensemble = mapper.ensemble
+        volmap._values_3d = mapper._volmap_values.reshape(mapper._volmap_shape)
+        volmap._dx_file = None
+        volmap._dx_path = None
 
         return volmap
         
@@ -318,7 +325,7 @@ class VolMap:
         if not filename:
             filename = f'{self.map_id}.dx'
             
-        if not self._values_3d:
+        if self._values_3d is None:
             raise ValueError('No 3D data available to write')
         
         nx, ny, nz = self.shape

@@ -32,6 +32,7 @@ class GlycanDockEnsemble:
     in_complex_pdb: str = None
     pose_files: List[str] = None
     grid_pdb: str = None
+    lig_iupac: str = None
     scoredata: pd.DataFrame = None
 
     # Internal attributes:
@@ -78,7 +79,7 @@ class GlycanDockEnsemble:
             self._n_poses = len(self.pose_files)
 
         if not self.run_id:
-            self.run_id = f'{self.in_complex_pdb.replace('.pdb', '')}_{self.grid_pdb.replace('.pdb', '')}_{self._n_poses}p'
+            self.run_id = f"{self.in_complex_pdb.replace('.pdb', '')}_{self.grid_pdb.replace('.pdb', '')}_{self._n_poses}p"
 
         # Use provided score names or default to standard ones:
         if score_names is None:
@@ -202,7 +203,7 @@ class GlycanDockEnsemble:
         min_cluster_size members are considered relevant.
         '''
         if not self._ensemble_file:
-            print('Cannot cluster poses until ensemble file is created.')
+            raise ValueError('Cannot cluster poses until ensemble file is created.')
         ens_name = os.path.basename(self._ensemble_file.replace('.pdb', ''))
         rmsd_sel = f'{ens_name} and not elem H'
         self.scoredata['cluster_id'] = None
