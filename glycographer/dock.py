@@ -34,7 +34,7 @@ class GlycanDockEnsemble:
     grid_pdb: str = None
     scoredata: pd.DataFrame = None
 
-    # Cached attributes (use field with init=False for derived attributes):
+    # Internal attributes:
     _rec_chain_id: str = field(default='A', init=False)
     _lig_chain_id: str = field(default='X', init=False)
     _n_poses: int = field(default=None, init=False)
@@ -53,7 +53,7 @@ class GlycanDockEnsemble:
             self._grid_path = os.path.abspath(self.grid_pdb)
 
     # Class-level constant for standard GlycanDock score names
-    STANDARD_SCORE_NAMES = [
+    _SCORE_FEATURES = [
         'Fnat', 'Fnat_intf_residues', 'glycan_Jump_res',
         'heavy_Lrmsd', 'heavy_Srmsd', 'interaction_energy',
         'mc_acceptance', 'n_intf_res_contacts', 'n_intf_residues',
@@ -82,7 +82,7 @@ class GlycanDockEnsemble:
 
         # Use provided score names or default to standard ones:
         if score_names is None:
-            score_names = self.STANDARD_SCORE_NAMES.copy()
+            score_names = self._SCORE_FEATURES.copy()
         
         # Create a pandas DataFrame for storing score data for each pose:
         # Use model numbers as index for easier lookup
