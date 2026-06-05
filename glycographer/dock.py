@@ -15,11 +15,11 @@ import pandas as pd
 import pymol
 from pymol import cmd
 
-from pyrosetta import init, pose_from_pdb, Vector1
-from pyrosetta.rosetta.protocols.rigid import RigidBodyRandomizeMover, partner_downstream
-from pyrosetta.rosetta.protocols.docking import setup_foldtree
-from pyrosetta.rosetta.protocols.ligand_docking import StartFrom
-from pyrosetta.rosetta.protocols.glycan_docking import GlycanDockProtocol
+#from pyrosetta import init, pose_from_pdb, Vector1
+#from pyrosetta.rosetta.protocols.rigid import RigidBodyRandomizeMover, partner_downstream
+#from pyrosetta.rosetta.protocols.docking import setup_foldtree
+#from pyrosetta.rosetta.protocols.ligand_docking import StartFrom
+#from pyrosetta.rosetta.protocols.glycan_docking import GlycanDockProtocol
 
 @dataclass
 class GlycanDockEnsemble:
