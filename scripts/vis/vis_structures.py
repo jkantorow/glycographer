@@ -5,25 +5,30 @@ Visualize ensemble / map data from an input file containing the name
 and desired base color scheme of each ensemble / map using pymol.
 '''
 
-from typing import List, Dict, Optional, Tuple
-import pymol
-from pymol import cmd
-import numpy as np
-import sys
-import re
-import os
-
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
 sys.path.insert(0, project_root)
 
-from scripts.vis.glycolors import (
-    get_snfg_color,
-    color_by_magnitude,
-    glycolor_by_magnitude,
-    atomcolor_by_magnitude
+from typing import Dict
+import sys
+import re
+import os
+
+import pymol
+from pymol import cmd
+import numpy as np
+
+from glycographer.map import VolMap
+from glycographer.vis import (
+    format_background,
+    vis_receptor,
+    vis_grid,
+    vis_crystal_ligand,
+    load_volmap_from_dx,
+    draw_contour,
+    draw_mapped_surface,
+    color_by_magnitude
 )
-from glycographer.mapping import VolMap
 
 def parse_config(configfile: str) -> Dict:
     ''' Get plotting data from input config file. '''
@@ -54,7 +59,7 @@ def get_data_from_filename(filename: str) -> Dict:
     resnames = [item.upper() for item in lig_parts if item.upper() in gly_pdbs]
     
     if ext == '.dx':
-        maptype = 'energy' if 'energy' in parts else 'count'
+        maptype = 'intengmin' if 'intengmin' in parts else 'count'
         atomname = parts[2] if parts[2].startswith(gly_elems) else None
     else:
         maptype = atomname = None
@@ -67,71 +72,6 @@ def get_data_from_filename(filename: str) -> Dict:
     structdat['atomname'] = atomname
 
     return structdat
-
-def format_background():
-    '''
-    Standardize the viewing environment for the output in pymol or vmd.
-    '''
-    cmd.set('bg_rgb', 'white')
-    cmd.set('depth_cue', 0)
-    cmd.set('ray_shadow', 0)
-    cmd.set('surface_quality', 2)
-
-def vis_receptor(receptor_pdb: str):
-    '''
-    Load and display receptor as grey surface:
-    '''
-    cmd.load(receptor_pdb, 'rec')
-    cmd.hide('cartoon', 'rec')
-    cmd.show('surface', 'rec')
-    cmd.color('grey80', 'rec')
-
-def vis_crystal_ligand(lig_pdb: str, mode: str = 'pymol'):
-    '''
-    Load and display known crystal glycoligand pose as licorice
-    representation colored by residue in standard SNFG format.
-    '''
-    lig_name = cmd.get_unused_name('crystal_lig_')
-    cmd.load(lig_pdb, lig_name)
-    cmd.show('sticks', lig_name)
-
-    # Get all unique residue names:
-    from pymol import stored
-    stored.res_types = []
-    cmd.iterate(f'{lig_name} and name c1', 'stored.res_types.append(resn)')
-    unique_res = set(stored.res_types)
-
-    # Color by SNFG standard:
-    for res in unique_res:
-        res_color = get_snfg_color(res, mode)
-        cmd.color(res_color, f'{lig_name} and resn {res}')
-
-def load_volmap_pymol(map_dx: str) -> str:
-    '''
-    Load a volume map file as a pymol object.
-    '''
-    map_name = os.path.basename(map_dx).replace('.dx', '')
-    cmd.load(map_dx, map_name)
-
-    return map_name
-
-def draw_isocontour_pymol(map_name: str, level: float = -1.0,
-                          style: str = 'mesh') -> str:
-    '''
-    Draw an isosurface, isomesh, or isodot contour at
-    a specified isolevel from an input pymol map object.
-    '''
-    contour_name = '_'.join([map_name, str(np.round(level, 3))])
-
-    if style == 'mesh':
-        cmd.isomesh(contour_name, map_name, level)
-    elif style == 'dots':
-        cmd.isodot(contour_name, map_name, level)
-    elif style == 'surface':
-        cmd.isosurface(contour_name, map_name, level)
-        cmd.set('transparency', 0.5, contour_name)
-
-    return contour_name
 
 def main():
 
@@ -148,16 +88,18 @@ def main():
                         help='Path to where structure files in config are stored.')
     parser.add_argument('-rec', '--receptor', type=str, required=True,
                         help='Receptor structure in pdb format around which the volume files were generated.')
-    parser.add_argument('-lig', '--crystal-ligand', type=str, required=False,
-                        help='Crystal glycoligand pose to display for reference if one is known.')
+    parser.add_argument('-grid', '--grid', type=str, required=False,
+                        help='Option to visualize the sampling grid generated above the receptor surface.')
+    parser.add_argument('-lig', '--ligand-pose', type=str, required=False,
+                        help='Glycoligand pose to display for reference.')
     parser.add_argument('-lvls', '--isolevels', nargs='+', required=False,
                         help='Option to manually specify values at which to plot isocontours if known prior (determined internally if not specified).')
     parser.add_argument('-nlvls', '--n-isolevels', type=int, default=5,
                         help='Number of isolevels to plot for each map if discrete values are not given (default: 5).')
-    parser.add_argument('--style', type=str, choices=['mesh', 'dot', 'surface'], default='mesh',
-                        help='Draw style in which to show the isocontours (default: mesh).')
     parser.add_argument('-o', '--outprefix', type=str, default='map_vis',
                         help='Prefix to name each output file.')
+    parser.add_argument('--bg-rgb', type=str, default='white',
+                        help='Output visualization background color (Default: white).')
 
     args = parser.parse_args()
 
@@ -178,13 +120,24 @@ def main():
         traceback.print_exc()
         return 1
     
-    # Load and visualize ligand if provided:
-    if args.crystal_ligand:
+    # Load and visualize the grid if provided:
+    if args.grid:
         try:
-            print(f'Adding crystal ligand: {args.crystal_ligand}')
-            vis_crystal_ligand(args.crystal_ligand)
+            print(f'Adding sampling grid: {args.grid}')
+            vis_grid(args.grid)
         except Exception as e:
-            print(f'Unable to visualize crystal ligand {args.crystal_ligand}: {e}')
+            print(f'Unable to load and visualize grid {args.grid}: {e}')
+            import traceback
+            traceback.print_exc()
+            return 1
+
+    # Load and visualize a ligand pose if provided:
+    if args.ligand_pose:
+        try:
+            print(f'Adding ligand: {args.ligand_pose}')
+            vis_crystal_ligand(args.ligand_pose)
+        except Exception as e:
+            print(f'Unable to visualize crystal ligand {args.ligand_pose}: {e}')
             import traceback
             traceback.print_exc()
             return 1
@@ -197,24 +150,19 @@ def main():
         structdat = get_data_from_filename(file)
         
         # Import the map data as a class instance for processing:
-        volmap = VolMap(
-            name=structdat['basename'],
-            recname=structdat['recname'],
-            maptype=structdat['maptype'],
-            resnames=structdat['resnames']
-        )
-        volmap.read_dx(file)
+        volmap = VolMap.from_dx(file)
 
-        # Also, import the map as a pymol object:
-        map_name_pml = load_volmap_pymol(file)
+        # Load the map into PyMOL:
+        map_name_pml = load_volmap_from_dx(file)
 
         # Extract data for visualizing:
-        map_min = volmap.get_min_voxel_val()
-        map_max = volmap.get_max_voxel_val()
+        occupied = volmap.values[volmap.values != 0]
+        map_min = np.min(occupied) if occupied.any() else None
+        map_max = np.max(occupied) if occupied.any() else None
 
         if not args.isolevels:
             # Plot n most significant isovals:
-            map_avg = volmap.get_avg_voxel_val()
+            map_avg = np.mean(occupied) if occupied.any() else None
             if map_avg < 0:
                 levels = np.linspace(map_min, map_avg, args.n_isolevels)
                 lvl_range = [map_min, map_avg]
@@ -230,7 +178,7 @@ def main():
 
         for lvl in levels:
             # Draw isocontours for each isolevel:
-            contour_name = draw_isocontour_pymol(map_name=map_name_pml, level=lvl, style=args.style)
+            contour_name = draw_contour(map_name_pml, lvl)
             
             # Color each isocontour by level magnitude:
             scaled_colorname = f'{structdat['ligname']}_magcol_{np.round(lvl, 3)}'
