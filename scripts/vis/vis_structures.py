@@ -5,14 +5,14 @@ Visualize ensemble / map data from an input file containing the name
 and desired base color scheme of each ensemble / map using pymol.
 '''
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
-sys.path.insert(0, project_root)
-
 from typing import Dict
 import sys
 import re
 import os
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
+sys.path.insert(0, project_root)
 
 import pymol
 from pymol import cmd
