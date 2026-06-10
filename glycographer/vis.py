@@ -81,7 +81,7 @@ def draw_contour(map_name: str, level: float):
     '''
     Draw an isomesh contour from a volume density map at a specified level.
     '''
-    contour_name = '_'.join(['contour', map_name, level])
+    contour_name = '_'.join(['contour', map_name, str(level)])
     cmd.isomesh(contour_name, map_name, level)
 
     return contour_name
