@@ -87,8 +87,8 @@ def main():
                         help='Filename of the sampling grid to use for energy landscape mapping (Not required if refining a predetermined input pose).')
     parser.add_argument('-o', '--outprefix', type=str, required=False,
                         help='Prefix appended to the beginning of all output files.')
-    parser.add_argument('--random-start', action='store_true', default=True,
-                        help='Specify whether to randomize input glycoligand orientation before running GlycanDockProtocol')
+    parser.add_argument('--no-random-start', action='store_true',
+                        help='Specify to not randomize input glycoligand orientation before running GlycanDockProtocol')
     parser.add_argument('--start-count-from', type=int, default=1,
                         help='Numeric id value to start output complex files from (use for checkpointing from a previous run) (default: 1).')
     parser.add_argument('--refine-only', action='store_true',
@@ -177,7 +177,9 @@ def main():
             start_from_grid.apply(complex_pose)
         
         # Randomize the orientation of the glycoligand before docking if specified:
-        if args.random_start:
+        if args.no_random_start:
+            pass
+        else:
             setup_foldtree(complex_pose, "A_X", Vector1([1])) # assign the glycoligand jump number to 1
             randomize = RigidBodyRandomizeMover(complex_pose, 1, partner_downstream)
             randomize.apply(complex_pose)
