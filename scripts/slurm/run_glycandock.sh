@@ -87,7 +87,7 @@ if [[ -n "$meshgrid" ]]; then python_args+=("--meshgrid" "$meshgrid"); fi
 if [[ -n "$outprefix" ]]; then python_args+=("--outprefix" "$outprefix"); fi
 if [[ -n "$options" ]]; then python_args+=("--options" "$options"); fi
 if [[ -n "$startcountfrom" ]]; then python_args+=("--start-count-from" "$startcountfrom"); fi
-if [[ $norandomstart = true]]; then python_args+=("--no-random-start"); fi
+if [[ $norandomstart = true ]]; then python_args+=("--no-random-start"); fi
 
 python $GLYCOGRAPHER_PATH/scripts/run_glycandock.py "${python_args[@]}"
 
