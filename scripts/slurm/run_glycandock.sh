@@ -62,6 +62,8 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
+module purge
+
 ## Resolve `GLYCOGRAPHER_PATH` and `CONDA_PATH`, expand ~, and set defaults
 if [ -z "$GLYCOGRAPHER_PATH" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,16 +83,9 @@ fi
 if [ -z "$CONDA_PATH" ]; then
     if command -v conda >/dev/null 2>&1; then
         CONDA_PATH="$(conda info --base 2>/dev/null || true)"
+    else
+        echo "Warning: conda not found; glycographer env may not activate properly"
     fi
-fi
-
-## Activate Conda: prefer sourcing conda.sh from CONDA_PATH, fallback to shell hook
-if [ -n "$CONDA_PATH" ] && [ -f "$CONDA_PATH/etc/profile.d/conda.sh" ]; then
-    source "$CONDA_PATH/etc/profile.d/conda.sh"
-elif command -v conda >/dev/null 2>&1; then
-    eval "$(conda shell.bash hook)"
-else
-    echo "Warning: conda not found; activation may fail" >&2
 fi
 
 # If a c-type options file was requested, override options
@@ -98,7 +93,8 @@ if [ $ctype = true ]; then
     options=$GLYCOGRAPHER_PATH/config/glycandock_ctype.init
 fi
 
-conda activate glycographer
+#source "$CONDA_PATH/etc/profile.d/conda.sh"
+#conda activate glycographer
 
 # Exit on any error
 set -e
@@ -119,6 +115,6 @@ if [[ -n "$options" ]]; then python_args+=("--options" "$options"); fi
 if [[ -n "$startcountfrom" ]]; then python_args+=("--start-count-from" "$startcountfrom"); fi
 if [[ $norandomstart = true ]]; then python_args+=("--no-random-start"); fi
 
-python $GLYCOGRAPHER_PATH/scripts/run_glycandock.py "${python_args[@]}"
+$CONDA_PATH/envs/glycographer/bin/python $GLYCOGRAPHER_PATH/scripts/run_glycandock.py "${python_args[@]}"
 
 exit 0
