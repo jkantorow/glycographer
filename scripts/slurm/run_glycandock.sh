@@ -16,15 +16,15 @@
 # complex.
 # ====================== #
 
-CONDA_PATH="/projects/SimBioSys/jkant/miniconda3-jkant/miniconda3-jkant"
-GLYCOGRAPHER_PATH="~/glycographer"
+CONDA_PATH="${CONDA_PATH:-}"
+GLYCOGRAPHER_PATH="${GLYCOGRAPHER_PATH:-}"
 
 nstruct=1
 mccycles=1
 outprefix=""
 ctype=false
 norandomstart=false
-options=$GLYCOGRAPHER_PATH/config/glycandock_defaults.init
+options=""
 startcountfrom=1
 
 while [[ "$#" -gt 0 ]]; do
@@ -62,12 +62,42 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
+## Resolve `GLYCOGRAPHER_PATH` and `CONDA_PATH`, expand ~, and set defaults
+if [ -z "$GLYCOGRAPHER_PATH" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    GLYCOGRAPHER_PATH="$(cd "$SCRIPT_DIR/.." && pwd)"
+else
+    case "$GLYCOGRAPHER_PATH" in
+        ~*) GLYCOGRAPHER_PATH="${HOME}${GLYCOGRAPHER_PATH#\~}" ;;
+    esac
+fi
+
+# Default options file (inside the repo) if not supplied
+if [ -z "$options" ]; then
+    options="$GLYCOGRAPHER_PATH/config/glycandock_defaults.init"
+fi
+
+## Prefer an explicitly set CONDA_PATH, otherwise try to discover Conda
+if [ -z "$CONDA_PATH" ]; then
+    if command -v conda >/dev/null 2>&1; then
+        CONDA_PATH="$(conda info --base 2>/dev/null || true)"
+    fi
+fi
+
+## Activate Conda: prefer sourcing conda.sh from CONDA_PATH, fallback to shell hook
+if [ -n "$CONDA_PATH" ] && [ -f "$CONDA_PATH/etc/profile.d/conda.sh" ]; then
+    source "$CONDA_PATH/etc/profile.d/conda.sh"
+elif command -v conda >/dev/null 2>&1; then
+    eval "$(conda shell.bash hook)"
+else
+    echo "Warning: conda not found; activation may fail" >&2
+fi
+
+# If a c-type options file was requested, override options
 if [ $ctype = true ]; then
     options=$GLYCOGRAPHER_PATH/config/glycandock_ctype.init
 fi
 
-# Source required python env:
-source $CONDA_PATH/etc/profile.d/conda.sh
 conda activate glycographer
 
 # Exit on any error
