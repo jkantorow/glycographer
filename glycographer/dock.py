@@ -103,19 +103,12 @@ class GlycanDockEnsemble:
             with open(file, 'r') as f:
                 lines = f.readlines()
 
+            parsed_sugar_residue_data = []
+
             # Extract scores and metadata from pose file:
             for line in lines:
-                # Note: this only works for single residue glycoligands.
-                # For disaccharides and longer, each residue is stored
-                # on a separate line from branch tips until the reducing
-                # end residue. This is useful for scraping data for each
-                # resiude of a longer ligand, but doesn't immediately give
-                # us the full IUPAC of the glycoligand outright.
-                if not self.lig_iupac and line.startswith('->'):
-                    # Extract IUPAC name and clean it
-                    iupac_raw = line.split()[0]
-                    # Remove Rosetta-specific suffixes
-                    self.lig_iupac = iupac_raw.split(':')[0]
+                if line.startswith('->'):
+                    parsed_sugar_residue_data.append(line.split()[0])
                 elif line.startswith(tuple(score_names)):
                     for score in score_names:
                         if line.startswith(score):
@@ -123,6 +116,11 @@ class GlycanDockEnsemble:
                                 scoredata.loc[model_num, score] = float(line.split()[1])
                             except (ValueError, IndexError) as e:
                                 print(f'Warning: Could not parse {score} from {file}: {e}')
+
+            # I need a better way to scrape the iupac and sugar residue data:
+            self._lig_residues = parsed_sugar_residue_data
+            if not self.lig_iupac:
+                self.lig_iupac = ','.join(parsed_sugar_residue_data)
 
         self.scoredata = scoredata
         return self
