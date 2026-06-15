@@ -9,6 +9,7 @@ import os
 
 from scipy.spatial import cKDTree
 import MDAnalysis as mda
+from MDAnalysis.analysis import rms
 import numpy as np
 import pandas as pd
 
@@ -250,7 +251,43 @@ class GlycanDockEnsemble:
 
         self._clusters = relevant_clusters
 
-        return relevant_clusters
+        return self
+
+    def rmsd_from_reference(self, reference_pdb: str, use_mda=False):
+        '''
+        Calculate the in-place RMSD of each pose to a known reference
+        pose.
+        '''
+        if use_mda:
+            u = mda.Universe(self._ensemble_file)
+            ref = mda.Universe(reference_pdb)
+
+            R = rms.RMSD(u, ref, select='not name *H*')
+            R.run()
+
+            self._rmsd_results = R.results.rmsd
+            self.scoredata['ref_rmsd'] = self._rmsd_results[2]
+        else:
+            pymol.finish_launching(['pymol', '-qc'])
+
+            cmd.load(self._ensemble_file, 'ensemble')
+            cmd.load(reference_pdb, 'reference')
+
+            cmd.select('ensemble_heavy', 'ensemble and not elem H')
+            cmd.select('reference_heavy', 'reference and not elem H')
+
+            rmsd_vals = []
+            for i in range(cmd.count_states('ensemble')):
+                rmsd = cmd.rms_cur('ensemble_heavy', 'reference_heavy',
+                                   mobile_state=i+1,
+                                   target_state=0)
+                rmsd_vals.append(rmsd)
+            cmd.quit()
+
+            self._rmsd_results = rmsd_vals
+            self.scoredata['ref_rmsd'] = self._rmsd_results
+
+        return self
 
     def get_score_values(self, score_name='interaction_energy'):
         '''
