@@ -11,6 +11,7 @@ import os
 from typing import Tuple
 
 import numpy as np
+import pandas as pd
 import matplotlib.colors as mcolors
 from pymol import cmd
 from pymol import stored
@@ -102,6 +103,49 @@ def draw_mapped_surface(rec_name: str, map_name: str,
     cmd.show('surface', rec_name)
 
     return ramp_name
+
+@cmd.extend
+def extract_pose_clusters(ens_name: str, scoredata:str):
+    '''
+    Extract clusters of poses contained in a scoredata file
+    from a PyMOL-loaded multistate ensemble and display in a
+    PyMOL visualization session.
+    '''
+    df = pd.read_csv(scoredata)
+
+    if 'model_num' not in df.columns or 'cluster_id' not in df.columns:
+        print("Error: CSV file must contain 'model_num' and 'cluster_id' columns")
+        return
+    
+    n_states = cmd.count_states(ens_name)
+    if n_states != df['model_num'].max():
+        print(f"Warning: Ensemble has {n_states} states but scoredata contains {df['model_num'].max()} model samples")
+
+    cluster_ids = df['cluster_id'].dropna().unique()
+    if len(cluster_ids) == 0:
+        print("No clusters found in the scoredata file")
+        return
+    
+    cluster_dict = {}
+    for cluster_id in cluster_ids:
+        if pd.isna(cluster_id) or cluster_id == '':
+            continue
+
+        cluster_name = f'cluster_{int(cluster_id)}'
+        cluster_models = df[df['cluster_id'] == cluster_id]['model_num'].tolist()
+
+        cluster_dict[cluster_name] = cluster_models
+        for model in cluster_models:
+            cmd.create(cluster_name,
+                       ens_name,
+                       source_state=int(model),
+                       target_state=-1)
+            
+    print('Cluster: Models')
+    for key, val in cluster_dict.items():
+        print(f'{key}: {val}')
+
+    return cluster_dict
 
 #### SNFG Coloring ####
 
