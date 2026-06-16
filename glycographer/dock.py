@@ -207,7 +207,6 @@ class GlycanDockEnsemble:
         rmsd_sel = f'{ens_name} and not elem H'
         self.scoredata['cluster_id'] = None
 
-        pymol.finish_launching(['pymol', '-qc'])
         cmd.load(self._ensemble_file, ens_name)
         
         clusters = {}
@@ -229,8 +228,6 @@ class GlycanDockEnsemble:
                 leaders.append(model_id)
                 cluster_id = f'cluster_{len(leaders)}'
                 clusters[cluster_id] = [model_id]
-
-        cmd.quit()
 
         # Filter clusters by min_cluster_size and update scoredata
         relevant_clusters = {}
@@ -265,9 +262,8 @@ class GlycanDockEnsemble:
 
             self._rmsd_results = R.results.rmsd
             self.scoredata['ref_rmsd'] = self._rmsd_results[2]
-        else:
-            pymol.finish_launching(['pymol', '-qc'])
 
+        else:
             cmd.load(self._ensemble_file, 'ensemble')
             cmd.load(reference_pdb, 'reference')
 
@@ -280,7 +276,6 @@ class GlycanDockEnsemble:
                                    mobile_state=i+1,
                                    target_state=0)
                 rmsd_vals.append(rmsd)
-            cmd.quit()
 
             self._rmsd_results = rmsd_vals
             self.scoredata['ref_rmsd'] = self._rmsd_results
