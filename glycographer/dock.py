@@ -36,6 +36,7 @@ class GlycanDockEnsemble:
     lig_iupac: str = None
     scoredata: pd.DataFrame = None
     residue_energies: pd.DataFrame = None
+    interface_energies: pd.DataFrame = None
 
     # Internal attributes:
     _rec_chain_id: str = field(default='A', init=False)
@@ -403,6 +404,152 @@ class GlycanDockEnsemble:
             outname = f'{self.run_id}_residue_energies.parquet'
 
         self.residue_energies.to_parquet(outname, index=False)
+        return outname
+
+    def extract_interface_energies(self, models=None, score_function=None,
+                                   init_flags='-include_sugars -mute all',
+                                   store=True, verbose=True):
+        '''
+        Compute per-term interaction energies between each glycan ligand
+        residue and the protein residues it contacts, by re-scoring poses in
+        PyRosetta and decomposing the two-body energies per residue pair.
+
+        REQUIRES PyRosetta -- run this on the Ubuntu partition / HPC. The
+        import is local so dock.py still imports on systems without it.
+
+        Why this and not the POSE_ENERGIES_TABLE: that table stores each
+        residue's *total* energy with every two-body term summed and split
+        50/50 between partners, so the residue->residue pairing is lost and
+        cannot be recovered. ScoreFunction.residue_pair_energy recomputes the
+        full two-body energy for one (glycan, protein) pair -- including
+        hydrogen bonds -- which is exactly the Newhouse-style decomposition.
+
+        Re-scoring is the expensive step, so pass a filtered/clustered subset
+        of `models` (e.g. from filter_by_score or a dominant cluster).
+
+        Parameters
+        ----------
+        models : list of int, optional
+            scoredata index (model_num) values to process. Defaults to all.
+        score_function : pyrosetta ScoreFunction, optional
+            Defaults to ref2015 (the GlycanDock scoring function). Pass the
+            exact score function used for docking for full consistency.
+        init_flags : str
+            Flags for pyrosetta.init() if PyRosetta is not already
+            initialized. Must include sugar support to read glycan PDBs.
+        store : bool
+            Store the result on self.interface_energies.
+
+        Returns
+        -------
+        pd.DataFrame (long format) with columns:
+            model_num, glycan_resnum, glycan_label,
+            protein_resnum, protein_label, term, weighted
+        '''
+        import pyrosetta
+        from pyrosetta import pose_from_pdb
+        from pyrosetta.rosetta.core.scoring import (
+            EMapVector, name_from_score_type)
+
+        # Initialize PyRosetta only if needed (defensive about API name):
+        try:
+            initialized = pyrosetta.rosetta.basic.was_init_called()
+        except Exception:
+            initialized = False
+        if not initialized:
+            pyrosetta.init(init_flags)
+
+        sfxn = score_function or pyrosetta.get_fa_scorefxn()
+        weights = sfxn.weights()
+        nonzero_terms = list(sfxn.get_nonzero_weighted_scoretypes())
+
+        if self.scoredata is None:
+            raise ValueError('No scoredata; run read_poses/from_poses first.')
+        if models is None:
+            models = list(self.scoredata.index)
+        file_for = dict(zip(self.scoredata.index, self.scoredata['pose_file']))
+
+        # Reuse the IUPAC labels already parsed from the energies table:
+        gly_label_map = {}
+        if self.residue_energies is not None:
+            gsub = self.residue_energies[self.residue_energies.is_glycan]
+            gly_label_map = dict(zip(gsub.residue_num.astype(int),
+                                     gsub.residue_label.astype(str)))
+
+        cols = {k: [] for k in ('model_num', 'glycan_resnum', 'glycan_label',
+                                 'protein_resnum', 'protein_label', 'term',
+                                 'weighted')}
+
+        for m in models:
+            pose = pose_from_pdb(file_for[m])
+            sfxn(pose)
+            energy_graph = pose.energies().energy_graph()
+            pdb_info = pose.pdb_info()
+            n = pose.total_residue()
+
+            glycan_res = [i for i in range(1, n + 1)
+                          if pose.residue(i).is_carbohydrate()]
+
+            for i in glycan_res:
+                res_i = pose.residue(i)
+                gly_label = gly_label_map.get(i, f'glycan_{i}')
+                for j in range(1, n + 1):
+                    res_j = pose.residue(j)
+                    if res_j.is_carbohydrate() or not res_j.is_protein():
+                        continue
+                    # Only pairs with a scoring edge can have nonzero
+                    # two-body energy -- this is the natural contact filter.
+                    if energy_graph.find_energy_edge(i, j) is None:
+                        continue
+                    emap = EMapVector()
+                    sfxn.residue_pair_energy(res_i, res_j, pose, emap)
+
+                    if pdb_info is not None:
+                        prot_label = f'{res_j.name3()}{pdb_info.number(j)}'
+                    else:
+                        prot_label = f'{res_j.name3()}{j}'
+
+                    for st in nonzero_terms:
+                        val = emap[st] * weights[st]
+                        if val == 0.0:
+                            continue
+                        cols['model_num'].append(m)
+                        cols['glycan_resnum'].append(i)
+                        cols['glycan_label'].append(gly_label)
+                        cols['protein_resnum'].append(j)
+                        cols['protein_label'].append(prot_label)
+                        cols['term'].append(name_from_score_type(st))
+                        cols['weighted'].append(val)
+
+            if verbose:
+                print(f'Decomposed interface energies for model {m}')
+
+        interface_energies = pd.DataFrame({
+            'model_num': np.asarray(cols['model_num'], dtype=np.int32),
+            'glycan_resnum': np.asarray(cols['glycan_resnum'], dtype=np.int32),
+            'glycan_label': pd.Categorical(cols['glycan_label']),
+            'protein_resnum': np.asarray(cols['protein_resnum'], dtype=np.int32),
+            'protein_label': pd.Categorical(cols['protein_label']),
+            'term': pd.Categorical(cols['term']),
+            'weighted': np.asarray(cols['weighted'], dtype=np.float32),
+        })
+
+        if store:
+            self.interface_energies = interface_energies
+        return interface_energies
+
+    def interface_energies_to_parquet(self, outname=None):
+        '''
+        Dump the long-format glycan-protein interface energy table to Parquet.
+        Requires a Parquet engine (pyarrow or fastparquet).
+        '''
+        if self.interface_energies is None:
+            raise ValueError(
+                f'No interface energy data found in {self}; run '
+                f'extract_interface_energies() first (needs PyRosetta).')
+        if outname is None:
+            outname = f'{self.run_id}_interface_energies.parquet'
+        self.interface_energies.to_parquet(outname, index=False)
         return outname
 
     def cluster_poses(self, rmsd_cutoff=2.0, min_cluster_size=4):
