@@ -131,8 +131,7 @@ class IntEngMinMapper(Mapper):
     def map(self, debug=False):
         '''
         Use the input docking run data to calculate
-        voxel-wise interaction energy scaled by pose
-        count:
+        voxel-wise interaction energy minimum:
         '''
         if self._atom_mappings is None:
             self._build_atom_mappings()
@@ -181,6 +180,70 @@ class IntEngMinMapper(Mapper):
         self._volmap_values = voxel_values
 
         return VolMap.from_mapper(self)
+
+@dataclass
+class IntEngAvgMapper(Mapper):
+    '''
+    Interface for mapping voxel-wise average interaction energy values from a
+    GlycanDockEnsemble.
+    '''
+    def __post_init__(self):
+        self._map_type = 'intengavg'
+
+    def map(self, debug=False):
+        '''
+        Use the input docking run data to calculate
+        voxel-wise interaction energy scaled by pose
+        count:
+        '''
+        # Utilize scaled interaction energy values:
+        if 'scaled_interaction_energy' not in self.ensemble.scoredata:
+            self.ensemble.scale_inteng()
+
+        if self._atom_mappings is None:
+            self._build_atom_mappings()
+        if self._volmap_coords is None:
+            self._setup_grid()
+
+        grid_points = np.column_stack([coords.ravel() for coords in self._volmap_coords])
+        tree = cKDTree(self._atom_mappings['coords'])
+        voxel_radius = self.voxel_size * np.sqrt(3) / 2
+
+        # Initialize all voxel values as 0:
+        voxel_values = np.zeros(grid_points.shape[0])
+
+        # Process energy calculation for each atom in each voxel:
+        for i, point in enumerate(grid_points):
+            if i % 10000 == 0:
+                print(f'Mapping progress: {(i/len(grid_points))*100}%')
+
+            # Query voxel for atom coordinates within radius:
+            atom_indices_in_voxel = tree.query_ball_point(point, voxel_radius)
+            
+            # If at least one atom is within this voxel:
+            if atom_indices_in_voxel:
+                # Get the model id of each atom:
+                models_in_voxel = self._atom_mappings['model_map'][atom_indices_in_voxel]
+                unique_models_in_voxel = np.unique(models_in_voxel)
+                if debug and len(unique_models_in_voxel) > 3:
+                    print(f'Model IDs found within voxel {i} @ coords {point}: {models_in_voxel} (unique: {unique_models_in_voxel})')
+
+                # Get interaction_energy scores for models within this voxel:
+                model_scores = []
+                for model_num in unique_models_in_voxel:
+                    score_val = self.ensemble.scoredata.loc[model_num, 'scaled_interaction_energy']
+                    if pd.notna(score_val):
+                        model_scores.append(score_val)
+
+                # Calculate voxel value:
+                voxel_values[i] = np.mean(model_scores) if model_scores else 0.0
+                if debug and len(model_scores) > 3:
+                    print(f'Model scores found for {unique_models_in_voxel} in voxel {i}: {model_scores}')
+                    print(f'Voxel value assigned: {voxel_values[i]}')
+
+        self._volmap_values = voxel_values
+
+        return VolMap.from_mapper(self)    
 
 @dataclass
 class VolMap:
