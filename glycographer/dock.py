@@ -7,6 +7,7 @@ from typing import Tuple, Dict, List
 import json
 import os
 
+from sklearn.preprocessing import MinMaxScaler
 from scipy.spatial import cKDTree
 import MDAnalysis as mda
 from MDAnalysis.analysis import rms
@@ -637,6 +638,23 @@ class GlycanDockEnsemble:
 
             self._rmsd_results = rmsd_vals
             self.scoredata['ref_rmsd'] = self._rmsd_results
+
+        return self
+
+    def scale_inteng(self, method='minmax'):
+        '''
+        Scale the interaction energy values of all poses of the ensemble
+        by a specific metric (Minmax scale by default where 0 is the worst
+        score and 1 is the best)
+        '''
+        vals = self.scoredata[self.scoredata['interaction_energy'] < 0].to_numpy()
+        vals = -vals
+
+        if method == 'minmax':
+            scaler = MinMaxScaler()
+        
+        scaled_vals = scaler.fit_transform(vals.reshape([-1, 1]))
+        self.scoredata['scaled_interaction_energy'] = scaled_vals
 
         return self
 
