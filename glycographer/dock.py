@@ -647,7 +647,8 @@ class GlycanDockEnsemble:
         by a specific metric (Minmax scale by default where 0 is the worst
         score and 1 is the best)
         '''
-        vals = self.scoredata[self.scoredata['interaction_energy'] < 0].to_numpy()
+        vals = self.scoredata['interaction_energy'].to_numpy()
+        vals = np.clip(vals, a_min=np.min(vals), a_max=0)
         vals = -vals
 
         if method == 'minmax':
