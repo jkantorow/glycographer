@@ -42,7 +42,7 @@ def main():
 
     if args.poserange:
         start, stop = args.poserange[0], args.poserange[1]
-        pose_list = glob.glob(os.path.join(args.posedir, 'REGEX PATTERN FOR START AND STOP'))
+        pose_list = glob.glob(os.path.join(args.posedir, 'GLOB PATTERN FOR START AND STOP'))
     else:
         pose_list = glob.glob(os.path.join(args.posedir, '*.pdb'))
 
