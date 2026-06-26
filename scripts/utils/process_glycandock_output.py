@@ -33,10 +33,6 @@ def main():
                         help='RMSD cutoff for assigning poses to a cluster in Angstroms (defalut: 2.0)')
     parser.add_argument('--min-cluster-size', type=int, default=4,
                         help='Minimum number of clustered poses to be considered significant')
-    parser.add_argument('--verbose', action='store_true',
-                        help='Verbose output')
-    parser.add_argument('--dump_pdb', action='store_true',
-                        help='Dump PDB with glycan info')
 
     args = parser.parse_args()
 
