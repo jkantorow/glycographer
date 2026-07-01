@@ -89,8 +89,8 @@ def draw_contour(map_name: str, level: float):
 
 @cmd.extend
 def draw_mapped_surface(rec_name: str, map_name: str,
-                        ramp_min=-1, ramp_max=0,
-                        color_min='red', color_max='white'):
+                        ramp_min=0, ramp_max=1,
+                        color_min='white', color_max='red'):
     '''
     Project a mapped molecular surface of probe score density onto the receptor.
     '''
