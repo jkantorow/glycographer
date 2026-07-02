@@ -408,50 +408,72 @@ class BoltzmannMapper(Mapper):
 class ResidueBoltzmannMapper(BoltzmannMapper):
     '''
     Per-residue Boltzmann soft-min. Instead of stamping each atom with its
-    whole-pose score, each atom carries the REF15 energy of the *glycan residue
-    it belongs to* (summed over energy terms from ensemble.residue_energies).
-    Contributions are deduplicated per (model, residue), so this resolves which
-    fragment actually sits in a voxel -- the SILCS-style fragment quantity --
-    and sharpens anchors while deflating hotspots inherited from floppy
-    residues elsewhere in the same pose.
+    whole-pose score, each atom carries the *interface interaction energy* of
+    the glycan residue it belongs to: the sum over its protein contacts of the
+    per-pair REF15 energies from ensemble.interface_energies. Contributions are
+    deduplicated per (model, residue), so this resolves which fragment actually
+    engages the protein in a voxel -- the SILCS-style fragment quantity, and a
+    residue-level decomposition of the whole-ligand interaction_energy -- while
+    deflating hotspots inherited from floppy residues elsewhere in the pose.
 
-    NOTE on residue numbering: this matches the ensemble PDB's residue ids
-    (resid) against residue_energies['residue_num']. Those come from the
-    Rosetta POSE_ENERGIES_TABLE labels; if your PDB resSeq differs from the
-    Rosetta pose numbering the match will fail and you'll get an empty map --
-    a warning is printed listing the mismatch so you can supply a mapping.
+    IMPORTANT: this uses interface_energies, NOT residue_energies. The
+    POSE_ENERGIES_TABLE totals in residue_energies are each residue's absolute
+    REF15 energy (dominated by internal strain, typically POSITIVE for sugars)
+    and are not a measure of binding. interface_energies comes from
+    extract_interface_energies() and REQUIRES PyRosetta (run it on the HPC
+    partition), so populate/load it before mapping.
+
+    NOTE on residue numbering: the ensemble PDB numbers ligand residues by
+    chain-X resSeq (e.g. 1, 2) while interface_energies['glycan_resnum'] uses
+    Rosetta pose numbering (e.g. 128, 129). These rarely coincide, so resids
+    are aligned to glycan_resnums by ASCENDING ORDER: the i-th glycan residue
+    in the PDB maps to the i-th glycan pose residue. Correct for linear glycans
+    (both run reducing -> non-reducing end); branched glycans whose PDB order
+    diverges from pose order need an explicit map. A warning is printed if the
+    two glycan-residue counts disagree.
     '''
     def __post_init__(self):
         super().__post_init__()
         self._map_type = 'residue_boltzmann'
 
     def _prepare_scores(self):
-        if self.ensemble.residue_energies is None:
+        if self.ensemble.interface_energies is None:
             raise ValueError(
-                'ResidueBoltzmannMapper needs per-residue energies; run '
-                'read_poses/from_poses with parse_energies=True first.')
+                'ResidueBoltzmannMapper maps per-residue *interface* '
+                'interaction energies from ensemble.interface_energies, which '
+                'is None. Run extract_interface_energies() (requires PyRosetta) '
+                'or load a precomputed interface_energies parquet first. Note: '
+                'residue_energies (POSE_ENERGIES_TABLE totals) is NOT usable '
+                'here -- those are absolute residue energies, not binding.')
 
     def _atom_keys_and_energies(self):
         models = self._atom_mappings['model_map']
         resids = self._atom_mappings['resid_map']
 
-        re = self.ensemble.residue_energies
-        gly = re[re.is_glycan]
-        # Total (summed-over-terms) energy per (model, residue):
-        res_energy = gly.groupby(['model_num', 'residue_num'])['weighted'].sum()
+        ie = self.ensemble.interface_energies
+        # Per-residue interface energy = sum of pair energies over protein
+        # contacts, per (model, glycan residue). Favorable = negative.
+        res_energy = ie.groupby(['model_num', 'glycan_resnum'])['weighted'].sum()
 
-        # Warn early if the PDB residue ids don't line up with the energy table.
-        pdb_resids = set(np.unique(resids).tolist())
-        table_resids = set(np.unique(gly['residue_num']).tolist())
-        if pdb_resids.isdisjoint(table_resids):
-            print('Warning: ensemble PDB residue ids '
-                  f'{sorted(pdb_resids)} do not intersect residue_energies '
-                  f'residue_num {sorted(table_resids)}. The per-residue map '
-                  'will be empty -- PDB resSeq likely differs from Rosetta '
-                  'pose numbering; supply a resid->pose-num mapping.')
+        # Align PDB chain-X resids to Rosetta glycan_resnums by ascending order
+        # (both run reducing -> non-reducing end for linear glycans).
+        pdb_resids = np.sort(self._atom_mappings['unique_resids'])
+        pose_nums = np.sort(ie['glycan_resnum'].unique())
+        if len(pdb_resids) != len(pose_nums):
+            print(f'Warning: {len(pdb_resids)} glycan residues in the ensemble '
+                  f'PDB but {len(pose_nums)} in interface_energies; the '
+                  'per-residue map may be incomplete. Check the residue '
+                  'ordering / supply an explicit resid->pose-num map.')
+        n = min(len(pdb_resids), len(pose_nums))
+        resid_to_pose = dict(zip(pdb_resids[:n], pose_nums[:n]))
 
-        idx = pd.MultiIndex.from_arrays([models, resids],
-                                        names=['model_num', 'residue_num'])
+        # Per-atom glycan pose-residue number (-1 for any unmapped resid).
+        mapped_pose = np.array([resid_to_pose.get(r, -1) for r in resids],
+                               dtype=np.int64)
+        idx = pd.MultiIndex.from_arrays([models, mapped_pose],
+                                        names=['model_num', 'glycan_resnum'])
+        # Residues with no protein contact are absent from interface_energies
+        # -> NaN -> dropped by map(); they correctly create no hotspot.
         energies = res_energy.reindex(idx).to_numpy()
 
         # Dedup key encodes (model, residue) into a single integer.
