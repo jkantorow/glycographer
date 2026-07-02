@@ -746,15 +746,22 @@ class ConsensusMap:
 
     def consensus_min(self):
         '''Best-case favorability at each voxel (most favorable across probes).'''
-        return self._as_map(np.nanmin(self._masked, axis=0), 'min')
+        present = ~np.isnan(self._masked)
+        any_present = np.any(present, axis=0)
+        filled = np.where(present, self._masked, np.inf)
+        mn = np.where(any_present, np.min(filled, axis=0), np.nan)
+        return self._as_map(mn, 'min')
 
     def consensus_mean(self):
         '''
         Average favorability across probes that visit each voxel -- generalist
         anchor sites (favorable to many fragment types) score most negative.
         '''
-        with np.errstate(invalid='ignore'):
-            return self._as_map(np.nanmean(self._masked, axis=0), 'mean')
+        present = ~np.isnan(self._masked)
+        counts = present.sum(axis=0)
+        sums = np.where(present, self._masked, 0.0).sum(axis=0)
+        mean = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
+        return self._as_map(mean, 'mean')
 
     def support_count(self, threshold=0.0):
         '''
