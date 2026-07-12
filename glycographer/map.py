@@ -389,11 +389,18 @@ class BoltzmannMapper(Mapper):
     the REU scale (favorable = negative), so BoltzmannMappers over different
     probes are directly comparable in a ConsensusMap.
 
+    Claude suggestion:
     Treat `beta` as an empirical focusing knob (NOT 1/kT): tune it against
     known complexes so the map neither collapses onto one voxel (too high) nor
     flattens out (too low). It also serves as your hotspot cutoff determinant.
+    
+    - However, I define the default value of beta as standard for basal temperature
+      in mol/kcal since, although technically in units of REU, REF15 is calibrated
+      along a kcal/mol-like scale. May need to find a beta value that is used for
+      REF15 in literature if this does not result in quality mapping output. The
+      previous default beta value was 0.5.
     '''
-    beta: float = 0.5
+    beta: float = 1.62 # mol/kcal @ 310.15K to represent standard body temperature
 
     def __post_init__(self):
         self._map_type = 'boltzmann'
