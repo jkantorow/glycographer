@@ -96,8 +96,8 @@ class GridSpec:
         Parameters
         ----------
         ensembles : iterable of GlycanDockEnsemble
-            Ensembles must already have their ensemble .pdb written
-            (call ensemble.to_pdb(...) first).
+            Bounds are read from each ensemble's in-memory `.universe`; no
+            to_pdb() call is required first.
         include_receptor_pdb : str, optional
             Also enclose the receptor's heavy atoms (useful if you want the
             grid pinned to the full receptor frame rather than just the
@@ -105,12 +105,7 @@ class GridSpec:
         '''
         mins, maxs = [], []
         for ens in ensembles:
-            ens_file = ens.get_ensemble_file()
-            if not ens_file:
-                raise ValueError(
-                    f'Ensemble {getattr(ens, "run_id", ens)} has no ensemble '
-                    f'file; call to_pdb() before building a shared grid.')
-            lo, hi = cls._coord_bounds(ens_file)
+            lo, hi = cls._coord_bounds_universe(ens.universe)
             mins.append(lo)
             maxs.append(hi)
         if include_receptor_pdb is not None:
@@ -126,7 +121,11 @@ class GridSpec:
     @staticmethod
     def _coord_bounds(pdb_file, selection='not name *H*'):
         '''Min/max heavy-atom coordinates over all frames of a (multi-model) file.'''
-        u = mda.Universe(pdb_file)
+        return GridSpec._coord_bounds_universe(mda.Universe(pdb_file), selection)
+
+    @staticmethod
+    def _coord_bounds_universe(u, selection='not name *H*'):
+        '''Min/max heavy-atom coordinates over all frames of a universe.'''
         atoms = u.select_atoms(selection)
         lo = np.full(3, np.inf)
         hi = np.full(3, -np.inf)
@@ -196,13 +195,14 @@ class Mapper:
 
     # ---- ensemble / atom bookkeeping ------------------------------------
     def _load_ensemble(self):
-        '''Load the ensemble into an MDAnalysis universe.'''
-        ensemble_file = self.ensemble.get_ensemble_file()
-        if not ensemble_file:
-            raise ValueError(
-                'No ensemble file available; call ensemble.to_pdb() first.')
-        self._universe = mda.Universe(ensemble_file)
-        print(f'Loaded {ensemble_file} with '
+        '''
+        Obtain the ensemble's MDAnalysis universe. Prefers the in-memory
+        universe built directly from parsed coordinates (no PDB round-trip);
+        falls back to a loaded ensemble PDB for from_files()-built ensembles.
+        No to_pdb() call is required before mapping.
+        '''
+        self._universe = self.ensemble.universe
+        print(f'Loaded universe for {self.ensemble.run_id} with '
               f'{len(self._universe.trajectory)} frames')
 
     def _build_atom_mappings(self):
