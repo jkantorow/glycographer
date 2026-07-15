@@ -11,6 +11,7 @@ from sklearn.preprocessing import MinMaxScaler
 from scipy.spatial import cKDTree
 import MDAnalysis as mda
 from MDAnalysis.analysis import rms
+from MDAnalysis.coordinates.memory import MemoryReader
 import numpy as np
 import pandas as pd
 
@@ -53,6 +54,20 @@ class GlycanDockEnsemble:
     _ensemble_file: str = field(default=None, init=False)
     _clusters: Dict = field(default=None, init=False)
 
+    # In-memory structural data captured during read_poses. The coordinate
+    # arrays are the source of truth for the ensemble structure; the multimodel
+    # PDB (_ensemble_file) and the MDAnalysis universe are both derived from
+    # them on demand, so pose files are only ever parsed once.
+    _lig_coords: np.ndarray = field(default=None, init=False)   # (n_models, n_lig, 3)
+    _rec_coords: np.ndarray = field(default=None, init=False)   # (n_models, n_rec, 3)
+    _lig_template: List[str] = field(default=None, init=False)  # model-1 ATOM/HETATM lines
+    _rec_template: List[str] = field(default=None, init=False)
+    _lig_names: np.ndarray = field(default=None, init=False)
+    _lig_resids_atom: np.ndarray = field(default=None, init=False)   # per-atom resSeq
+    _lig_resnames_atom: np.ndarray = field(default=None, init=False)
+    _lig_elements: np.ndarray = field(default=None, init=False)
+    _universe: mda.Universe = field(default=None, init=False)
+
     def __post_init__(self):
         '''Initialize derived attributes after dataclass initialization.'''
         if self.in_complex_pdb:
@@ -74,7 +89,8 @@ class GlycanDockEnsemble:
     @classmethod
     def from_poses(cls, pose_list, in_complex_pdb=None, grid_pdb=None,
                    run_type='probe', run_id=None, score_names=None,
-                   parse_energies=True, glycan_only=True):
+                   parse_energies=True, glycan_energies_only=True,
+                   store_receptor=False):
         '''
         Instantiate a GlycanDockEnsemble directly from a collection of
         GlycanDock output pose files.
@@ -94,8 +110,15 @@ class GlycanDockEnsemble:
             Per-pose GlycanDock score labels to extract.
         parse_energies : bool, optional
             Parse the per-residue REF15 energy table into residue_energies.
-        glycan_only : bool, optional
-            Only store glycan ligand residue energies (default True).
+        glycan_energies_only : bool, optional
+            Scope of the parsed REF15 energy table: if True (default), only
+            store energy rows for glycan ligand residues; set False to also
+            store protein residues (much larger table).
+        store_receptor : bool, optional
+            Also capture receptor coordinates for every pose so that
+            to_pdb(include_receptor=True) can serialize them without
+            re-reading pose files (default False; ligand coords are always
+            captured). Costs n_models x n_receptor_atoms x 3 floats of RAM.
 
         Returns
         -------
@@ -107,9 +130,99 @@ class GlycanDockEnsemble:
         )
         ensemble.read_poses(
             pose_list, score_names=score_names,
-            parse_energies=parse_energies, glycan_only=glycan_only,
+            parse_energies=parse_energies,
+            glycan_energies_only=glycan_energies_only,
+            store_receptor=store_receptor,
         )
         return ensemble
+
+    @classmethod
+    def from_files(cls, run_id=None, ensemble_pdb=None, scores_csv=None,
+                   residue_energies_parquet=None,
+                   interface_energies_parquet=None, run_type='probe',
+                   in_complex_pdb=None, grid_pdb=None, lig_iupac=None):
+        '''
+        Reconstruct a GlycanDockEnsemble from previously dumped artifacts,
+        skipping the (expensive) parse of the raw pose files entirely.
+
+        This is the complement of from_poses: use it once you have written an
+        ensemble PDB (to_pdb), a scores CSV (scores_to_csv), and/or the energy
+        Parquets (energies_to_parquet / interface_energies_to_parquet), e.g.
+        via save_all(). The ensemble PDB is served lazily through `.universe`;
+        no coordinates are held in RAM until the universe is first accessed.
+
+        Parameters
+        ----------
+        run_id : str, optional
+            Identifier for the run. Defaults to the ensemble PDB basename.
+        ensemble_pdb : str, optional
+            Multimodel ligand ensemble PDB (as written by to_pdb). Backs
+            `.universe` and the PyMOL-based analyses.
+        scores_csv : str, optional
+            Per-pose score table (as written by scores_to_csv), indexed by
+            model_num.
+        residue_energies_parquet, interface_energies_parquet : str, optional
+            Long-format energy tables (as written by the *_to_parquet methods).
+        run_type, in_complex_pdb, grid_pdb, lig_iupac : optional
+            Passthrough metadata.
+
+        Returns
+        -------
+        GlycanDockEnsemble
+        '''
+        if run_id is None and ensemble_pdb is not None:
+            run_id = os.path.basename(ensemble_pdb).replace('_ensemble.pdb', '') \
+                .replace('.pdb', '')
+
+        ens = cls(run_type=run_type, run_id=run_id,
+                  in_complex_pdb=in_complex_pdb, grid_pdb=grid_pdb,
+                  lig_iupac=lig_iupac)
+
+        if scores_csv is not None:
+            ens.scoredata = pd.read_csv(scores_csv, index_col='model_num')
+        if residue_energies_parquet is not None:
+            ens.residue_energies = pd.read_parquet(residue_energies_parquet)
+        if interface_energies_parquet is not None:
+            ens.interface_energies = pd.read_parquet(interface_energies_parquet)
+        if ensemble_pdb is not None:
+            ens._ensemble_file = os.path.abspath(ensemble_pdb)
+            if ens._n_poses is None:
+                ens._n_poses = len(ens.universe.trajectory)
+
+        return ens
+
+    def save_all(self, out_dir='.', include_receptor=False):
+        '''
+        Dump every populated artifact to `out_dir` under run_id-derived names,
+        so the ensemble can later be reloaded with from_files() without
+        re-parsing poses. Skips artifacts that have not been populated.
+
+        Returns
+        -------
+        dict : {artifact_name: path} for everything written.
+        '''
+        os.makedirs(out_dir, exist_ok=True)
+        written = {}
+
+        def _p(name):
+            return os.path.join(out_dir, name)
+
+        if self._lig_coords is not None or self._ensemble_file:
+            written['ensemble_pdb'] = self.to_pdb(
+                outname=_p(f'{self.run_id}_ensemble.pdb'),
+                include_receptor=include_receptor)
+        if self.scoredata is not None:
+            written['scores_csv'] = self.scores_to_csv(
+                _p(f'{self.run_id}_scores.csv'))
+        if self.residue_energies is not None:
+            written['residue_energies_parquet'] = self.energies_to_parquet(
+                _p(f'{self.run_id}_residue_energies.parquet'))
+        if self.interface_energies is not None:
+            written['interface_energies_parquet'] = \
+                self.interface_energies_to_parquet(
+                    _p(f'{self.run_id}_interface_energies.parquet'))
+
+        return written
 
     @staticmethod
     def _to_float(token):
@@ -203,13 +316,18 @@ class GlycanDockEnsemble:
                     cols['weighted'].append(self._to_float(v))
 
     def read_poses(self, pose_list, score_names=None,
-                   parse_energies=True, glycan_only=True):
+                   parse_energies=True, glycan_energies_only=True,
+                   store_receptor=False):
         '''
         Import object data from a collection of Rosetta output poses.
 
         Populates the per-pose `scoredata` DataFrame and, when
         parse_energies is True, the long-format `residue_energies`
-        DataFrame (one row per pose / residue / energy term).
+        DataFrame (one row per pose / residue / energy term). In the same
+        single pass it also captures the ligand (and, if store_receptor,
+        receptor) heavy+hydrogen coordinates into in-memory arrays, which
+        become the source of truth for both the `.universe` and `to_pdb()`
+        -- so pose files are only ever read once.
 
         Parameters
         ----------
@@ -222,9 +340,15 @@ class GlycanDockEnsemble:
             Parse the per-residue REF15 energy table at the bottom of each
             pose (default True). The table is already in memory from reading
             the file, so this adds negligible time.
-        glycan_only : bool, optional
-            If True (default), only store energy rows for glycan ligand
-            residues. Set False to also store protein residues (much larger).
+        glycan_energies_only : bool, optional
+            Scope of the parsed REF15 energy table: if True (default), only
+            store energy rows for glycan ligand residues. Set False to also
+            store protein residues (much larger table). Does not affect the
+            captured structure -- ligand coordinates are always stored.
+        store_receptor : bool, optional
+            Also capture receptor (chain _rec_chain_id) coordinates per pose
+            so to_pdb(include_receptor=True) can serialize them from memory
+            (default False).
         '''
         # Create a list of each pose file:
         if not self.pose_files:
@@ -261,6 +385,12 @@ class GlycanDockEnsemble:
         cols = {k: [] for k in ('model_num', 'residue_num', 'residue_label',
                                  'is_glycan', 'term', 'weighted')}
 
+        # Per-model coordinate accumulators for the in-memory structure. Atom
+        # identity (names/resids/elements/order) is constant across poses, so
+        # the topology is captured once from model 1; only coordinates vary.
+        lig_coords_per_model = []
+        rec_coords_per_model = []
+
         # Parse each pose file to extract data:
         for i, file in enumerate(self.pose_files):
             model_num = i + 1
@@ -270,6 +400,31 @@ class GlycanDockEnsemble:
                 lines = f.readlines()
 
             glycan_labels = []
+
+            # Capture ligand (and optionally receptor) atom records for the
+            # structural ensemble, in file order.
+            lig_recs = [ln for ln in lines
+                        if ln.startswith(('ATOM', 'HETATM'))
+                        and ln[21] == self._lig_chain_id]
+            if not lig_recs:
+                raise ValueError(
+                    f'No chain-{self._lig_chain_id} (ligand) atoms found in '
+                    f'{file}. Check _lig_chain_id.')
+            if model_num == 1:
+                self._capture_ligand_topology(lig_recs)
+            self._check_atom_count(lig_recs, self._lig_template, file, 'ligand')
+            lig_coords_per_model.append(self._coords_from_records(lig_recs))
+
+            if store_receptor:
+                rec_recs = [ln for ln in lines
+                            if ln.startswith(('ATOM', 'HETATM'))
+                            and ln[21] == self._rec_chain_id]
+                if model_num == 1:
+                    self._rec_template = list(rec_recs)
+                self._check_atom_count(rec_recs, self._rec_template, file,
+                                       'receptor')
+                rec_coords_per_model.append(
+                    self._coords_from_records(rec_recs))
 
             # Extract per-pose GlycanDock scores and glycan residue labels:
             for line in lines:
@@ -296,10 +451,17 @@ class GlycanDockEnsemble:
 
             # Parse the per-residue REF15 energy table:
             if parse_energies:
-                self._parse_energy_table(lines, model_num, glycan_only,
+                self._parse_energy_table(lines, model_num, glycan_energies_only,
                                          cols, source_file=file)
 
         self.scoredata = scoredata
+
+        # Stack per-model coordinates into (n_models, n_atoms, 3) arrays.
+        self._lig_coords = np.asarray(lig_coords_per_model, dtype=np.float32)
+        if store_receptor:
+            self._rec_coords = np.asarray(rec_coords_per_model, dtype=np.float32)
+        # Invalidate any previously built universe now that coords changed.
+        self._universe = None
 
         # Build the long-format residue energy table with compact dtypes:
         if parse_energies and cols['model_num']:
@@ -313,6 +475,95 @@ class GlycanDockEnsemble:
             })
 
         return self
+
+    # ---- in-memory structure: capture, universe, serialization ----------
+    @staticmethod
+    def _coords_from_records(records):
+        '''Parse the (N, 3) xyz array out of a list of PDB ATOM/HETATM lines.'''
+        return np.array(
+            [[float(r[30:38]), float(r[38:46]), float(r[46:54])]
+             for r in records], dtype=np.float32)
+
+    @staticmethod
+    def _check_atom_count(records, template, source_file, which):
+        '''Guard that every pose has the same atom count/order as model 1.'''
+        if template is not None and len(records) != len(template):
+            raise ValueError(
+                f'{which} atom count in {source_file} ({len(records)}) differs '
+                f'from model 1 ({len(template)}); poses must share topology.')
+
+    def _capture_ligand_topology(self, records):
+        '''
+        Record the ligand's per-atom identity from the first pose. These are
+        constant across poses, so they are stored once and reused to build the
+        universe and to re-emit PDB lines in to_pdb().
+        '''
+        self._lig_template = list(records)
+        self._lig_names = np.array([r[12:16].strip() for r in records])
+        self._lig_resids_atom = np.array([int(r[22:26]) for r in records],
+                                          dtype=np.int64)
+        self._lig_resnames_atom = np.array([r[17:20].strip() for r in records])
+        self._lig_elements = np.array([r[76:78].strip() for r in records])
+
+    def _build_universe(self):
+        '''
+        Build a ligand-only MDAnalysis Universe from the captured coordinate
+        arrays via MemoryReader -- no PDB file is written. Frame f (0-based)
+        corresponds to model_num f + 1, matching scoredata's index, and the
+        atom selection / resid semantics match the old file-based universe so
+        the mapper is unaffected.
+        '''
+        if self._lig_coords is None:
+            raise ValueError(
+                'No in-memory ligand coordinates; call read_poses/from_poses '
+                'first, or use from_files() with an ensemble PDB.')
+
+        resids_atom = self._lig_resids_atom
+        # Residues in first-appearance (file) order.
+        ridx_of = {}
+        atom_resindex = np.empty(len(resids_atom), dtype=np.int64)
+        unique_resids = []
+        resnames = []
+        for a, rid in enumerate(resids_atom):
+            if rid not in ridx_of:
+                ridx_of[rid] = len(unique_resids)
+                unique_resids.append(rid)
+                resnames.append(self._lig_resnames_atom[a])
+            atom_resindex[a] = ridx_of[rid]
+
+        n_atoms = self._lig_coords.shape[1]
+        u = mda.Universe.empty(
+            n_atoms, n_residues=len(unique_resids),
+            atom_resindex=atom_resindex, trajectory=True)
+        u.add_TopologyAttr('names', self._lig_names)
+        u.add_TopologyAttr('types', self._lig_elements)
+        u.add_TopologyAttr('resids', np.asarray(unique_resids, dtype=np.int64))
+        u.add_TopologyAttr('resnames', np.asarray(resnames))
+        u.add_TopologyAttr('segids', [self._lig_chain_id])
+        u.load_new(self._lig_coords, format=MemoryReader)
+        return u
+
+    @property
+    def universe(self):
+        '''
+        Lazily built, cached MDAnalysis Universe of the ligand ensemble.
+
+        Prefers the in-memory coordinate arrays captured by read_poses; falls
+        back to reading a cached/loaded multimodel PDB (_ensemble_file), which
+        is how a from_files()-constructed ensemble is served. This is the
+        object a Mapper should consume -- no to_pdb() call is required.
+        '''
+        if self._universe is None:
+            if self._lig_coords is not None:
+                self._universe = self._build_universe()
+            elif self._ensemble_file and os.path.exists(self._ensemble_file):
+                self._universe = mda.Universe(self._ensemble_file)
+            else:
+                raise ValueError(
+                    'No structure available to build a universe: read_poses '
+                    'has not run and no ensemble PDB is set. Use from_poses() '
+                    'or from_files(ensemble_pdb=...).')
+        return self._universe
 
     def to_pdb(self, outname=None, include_receptor=False):
         '''
@@ -331,38 +582,82 @@ class GlycanDockEnsemble:
         Returns:
         --------
         str : Path to created ensemble file
+
+        Notes
+        -----
+        This serializes the coordinate arrays captured by read_poses -- pose
+        files are NOT re-read. Each model's line is the model-1 template with
+        fresh coordinates spliced into columns 31-54, so occupancy, B-factor,
+        element, and atom naming are preserved exactly. include_receptor=True
+        requires read_poses(store_receptor=True); otherwise it falls back to
+        re-reading the original pose files.
         '''
-        if not self.pose_files:
-            raise ValueError(f'No pose data found in object {self}')
-        
         if outname is None:
             outname = f'{self.run_id}_ensemble.pdb'
-        
+
+        # include_receptor without captured receptor coords -> legacy fallback.
+        if include_receptor and self._rec_coords is None:
+            return self._to_pdb_from_files(outname, include_receptor=True)
+
+        if self._lig_coords is None:
+            raise ValueError(
+                f'No structural data in {self}; run read_poses/from_poses '
+                f'(or use from_files with an ensemble PDB).')
+
         ensemble_lines = []
-
-        for i, file in enumerate(self.pose_files):
-            model_num = i + 1
-            with open(file, 'r') as f:
-                lines = f.readlines()
-
-                # Write Model header for each pose:
-                ensemble_lines.append(f'MODEL     {model_num:4d}\n')
-
-                # Extract only glycoligand data:
-                for line in lines:
-                    if include_receptor:
-                        if line.startswith(('ATOM', 'HETATM')) and line[21] == self._rec_chain_id:
-                            ensemble_lines.append(line)
-                    if line.startswith(('ATOM', 'HETATM')) and line[21] == self._lig_chain_id:
-                        ensemble_lines.append(line)
-
-                # Designate the end of the current model:
-                ensemble_lines.append('ENDMDL\n')
+        for m in range(self._lig_coords.shape[0]):
+            ensemble_lines.append(f'MODEL     {m + 1:4d}\n')
+            if include_receptor:
+                self._emit_model_lines(ensemble_lines, self._rec_template,
+                                       self._rec_coords[m])
+            self._emit_model_lines(ensemble_lines, self._lig_template,
+                                   self._lig_coords[m])
+            ensemble_lines.append('ENDMDL\n')
 
         with open(outname, 'w') as f:
             f.writelines(ensemble_lines)
 
-        self._ensemble_file = os.path.abspath(outname)  # Cache the ensemble file path
+        self._ensemble_file = os.path.abspath(outname)  # Cache the path
+        return outname
+
+    @staticmethod
+    def _emit_model_lines(out, template, coords):
+        '''
+        Append one model's PDB lines to `out` by splicing `coords` (N, 3) into
+        the fixed coordinate columns (31-54) of each template line.
+        '''
+        for line, (x, y, z) in zip(template, coords):
+            out.append(f'{line[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{line[54:]}')
+
+    def _to_pdb_from_files(self, outname, include_receptor=False):
+        '''
+        Legacy path: build the multimodel ensemble by re-reading the original
+        pose files. Used only when receptor coordinates were not captured in
+        memory but include_receptor=True is requested.
+        '''
+        if not self.pose_files:
+            raise ValueError(
+                f'Cannot write receptor ensemble for {self}: no captured '
+                f'receptor coords and no pose_files to re-read. Re-run '
+                f'read_poses with store_receptor=True.')
+
+        ensemble_lines = []
+        for i, file in enumerate(self.pose_files):
+            ensemble_lines.append(f'MODEL     {i + 1:4d}\n')
+            with open(file, 'r') as f:
+                for line in f:
+                    if not line.startswith(('ATOM', 'HETATM')):
+                        continue
+                    chain = line[21]
+                    if chain == self._lig_chain_id or (
+                            include_receptor and chain == self._rec_chain_id):
+                        ensemble_lines.append(line)
+            ensemble_lines.append('ENDMDL\n')
+
+        with open(outname, 'w') as f:
+            f.writelines(ensemble_lines)
+
+        self._ensemble_file = os.path.abspath(outname)
         return outname
     
     def scores_to_csv(self, outname=None):
@@ -723,8 +1018,20 @@ class GlycanDockEnsemble:
 
         return self.scoredata.loc[filtered_indices]
     
-    def get_ensemble_file(self):
-        '''Get the path to the ensemble file, creating it if necessary.'''
-        if self._ensemble_file is None or not os.path.exists(self._ensemble_file):
-            print('No ensemble file has been generated.')
+    def get_ensemble_file(self, include_receptor=False):
+        '''
+        Return a path to the multimodel ensemble PDB, writing it on demand.
+
+        Downstream tools that need a file on disk (the PyMOL-based
+        cluster_poses / rmsd_from_reference) call this. If a file was already
+        written or loaded it is reused; otherwise to_pdb() materializes one
+        from the in-memory coordinates. Mapping does NOT need this -- use the
+        in-memory `.universe` instead.
+        '''
+        if self._ensemble_file and os.path.exists(self._ensemble_file):
+            return self._ensemble_file
+        if self._lig_coords is not None:
+            return self.to_pdb(include_receptor=include_receptor)
+        print('No ensemble file has been generated and no in-memory '
+              'coordinates are available to create one.')
         return self._ensemble_file
