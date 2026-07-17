@@ -78,6 +78,18 @@ def load_volmap_from_dx(map_dx: str):
     return map_name
 
 @cmd.extend
+def get_map_stats(map_name: str):
+    '''
+    Helper function for interactive sessions that outputs
+    the range of a specified loaded map object.
+    '''
+    stats = cmd.get_volume_histogram(map_name, 0)
+    print(f'Range: [{stats[0]}, {stats[1]}]')
+    print(f'Mean: {stats[2]} (stdev: {stats[3]})')
+
+    return stats
+
+@cmd.extend
 def draw_contour(map_name: str, level: float):
     '''
     Draw an isomesh contour from a volume density map at a specified level.
