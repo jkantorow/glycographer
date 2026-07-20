@@ -28,13 +28,13 @@ def format_background(bg_rgb='white'):
 @cmd.extend
 def vis_receptor(receptor_pdb: str):
     '''
-    Load and display receptor as grey surface:
+    Load and display receptor as a white surface:
     '''
     rec_name = os.path.basename(receptor_pdb).replace('.pdb', '')
     cmd.load(receptor_pdb, rec_name)
     cmd.hide('cartoon', rec_name)
     cmd.show('surface', rec_name)
-    cmd.color('grey80', rec_name)
+    cmd.color('white', rec_name)
 
     return rec_name
 
