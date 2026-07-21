@@ -408,6 +408,17 @@ class BoltzmannMapper(Mapper):
 
     def _reduce(self, energies):
         e = np.asarray(energies, dtype=float)
+        # Soft-min over favorable (negative) contributions only, matching the
+        # IntEngMin convention: a voxel with no favorable pose is empty (0.0),
+        # not a positive "anti-hotspot". Without this floor, voxels touched only
+        # by clashing poses take large positive values that (a) are not the 0.0
+        # sentinel and so survive ConsensusMap's zeros->NaN masking, polluting
+        # consensus_mean, and (b) inflate the map's maximum well above 0. When a
+        # favorable pose coexists with unfavorable ones, the positives are
+        # already exponentially suppressed, so this only changes all-clash voxels.
+        e = e[e < 0]
+        if e.size == 0:
+            return 0.0
         return float(-np.logaddexp.reduce(-self.beta * e) / self.beta)
 
 
