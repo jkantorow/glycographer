@@ -13,13 +13,38 @@ import pandas as pd
 from pymol import cmd
 from pymol import stored
 
-# vis.py doubles as a package module and a script run inside an interactive
-# PyMOL session via `run /path/to/glycographer/vis.py`. In the latter case the
-# package is not necessarily importable, so put the repo root on sys.path before
-# importing sibling modules. Harmless when imported normally.
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+
+def _bootstrap_repo_root():
+    '''
+    Put the repo root on sys.path so `import glycographer.*` works even when
+    this file is executed via PyMOL's `run /path/to/glycographer/vis.py`.
+
+    Under `run`, the package is not otherwise importable, and PyMOL may hand us
+    a __file__ that still contains an unexpanded '~' (os.path.abspath does not
+    expand it), so we expand the user, then walk up looking for the directory
+    that actually contains the glycographer package rather than assuming a fixed
+    number of levels. Falls back to PyMOL's __script__ if __file__ is absent.
+    '''
+    here = globals().get('__file__')
+    if not here:
+        try:
+            import pymol
+            here = getattr(pymol, '__script__', None)
+        except Exception:
+            here = None
+    if not here:
+        return
+    here = os.path.abspath(os.path.expanduser(here))
+    d = os.path.dirname(here)
+    for _ in range(4):
+        if os.path.isdir(os.path.join(d, 'glycographer')):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            return
+        d = os.path.dirname(d)
+
+
+_bootstrap_repo_root()
 
 from glycographer.colors import get_snfg_color, color_by_magnitude  # noqa: E402
 
