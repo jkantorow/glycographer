@@ -23,7 +23,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
 sys.path.insert(0, project_root)
 
-from scripts.vis.glycolors import (
+from scripts.vis._DEPR.glycolors import (
     get_snfg_color,
     glycolor_by_magnitude,
     atomcolor_by_magnitude
