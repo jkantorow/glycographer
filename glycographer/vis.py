@@ -17,21 +17,18 @@ from pymol import stored
 def _bootstrap_repo_root():
     '''
     Put the repo root on sys.path so `import glycographer.*` works even when
-    this file is executed via PyMOL's `run /path/to/glycographer/vis.py`.
+    this file is executed via PyMOL's `run /path/to/glycographer/vis.py`
+    (where the package is not otherwise importable).
 
-    Under `run`, the package is not otherwise importable, and PyMOL may hand us
-    a __file__ that still contains an unexpanded '~' (os.path.abspath does not
-    expand it), so we expand the user, then walk up looking for the directory
-    that actually contains the glycographer package rather than assuming a fixed
-    number of levels. Falls back to PyMOL's __script__ if __file__ is absent.
+    PyMOL's `run` execs the script in the *pymol module's* namespace and sets a
+    `__script__` global to the script path (see pymol/parsing.py run_file). It
+    does NOT set `__file__`, so `globals()['__file__']` here would be PyMOL's own
+    __init__.py -- useless for locating this repo. So prefer `__script__`; only
+    fall back to `__file__` for the normal package-import case. Then walk up from
+    the script looking for the directory that actually contains the glycographer
+    package, rather than assuming a fixed number of levels.
     '''
-    here = globals().get('__file__')
-    if not here:
-        try:
-            import pymol
-            here = getattr(pymol, '__script__', None)
-        except Exception:
-            here = None
+    here = globals().get('__script__') or globals().get('__file__')
     if not here:
         return
     here = os.path.abspath(os.path.expanduser(here))
