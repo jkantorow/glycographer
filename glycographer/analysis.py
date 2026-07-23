@@ -316,7 +316,8 @@ def _minima_persistence(field, mask):
 
 
 def find_hotspots(volmap, level=None, min_voxels=3, min_persistence=None,
-                  smooth_sigma=None, connectivity=1, return_labels=False):
+                  top_n=None, smooth_sigma=None, connectivity=1,
+                  return_labels=False):
     '''
     Segment a volume map into discrete hotspots and rank them by persistence.
 
@@ -327,10 +328,17 @@ def find_hotspots(volmap, level=None, min_voxels=3, min_persistence=None,
 
       1. finds the local minima of the favorable field and their topological
          persistence (_minima_persistence),
-      2. optionally drops minima below ``min_persistence`` (prunes ripples),
-      3. uses the surviving minima as markers for a marker-controlled watershed
+      2. uses *all* the minima as markers for a marker-controlled watershed
          (skimage), which splits the favorable region into one basin per
-         minimum -- separating pockets that share a ridge.
+         minimum -- separating pockets that share a ridge and keeping each
+         basin tight (bounded by its neighbours),
+      3. filters the resulting basins by size and persistence and ranks them.
+
+    Significance filtering is applied to the basins, NOT to the markers: pruning
+    markers before the watershed would let the few survivors flood the entire
+    favorable region into a handful of giant basins (the very pathology this
+    replaces). All minima seed the flood; ``min_persistence`` then decides which
+    basins to report.
 
     Each hotspot carries its peak (most favorable) and mean voxel value, its
     persistence (depth-until-merge -- the significance score), its size in
@@ -348,9 +356,18 @@ def find_hotspots(volmap, level=None, min_voxels=3, min_persistence=None,
     min_voxels : int
         Drop basins smaller than this many voxels.
     min_persistence : float, optional
-        Drop minima whose persistence is below this (in favorability units,
-        i.e. positive REU-like depth). None keeps all; filter afterward on the
-        returned 'persistence' column, or set to suppress shallow ripples.
+        Drop basins whose persistence is below this (favorability units, i.e.
+        positive REU-like depth). None keeps all.
+    top_n : int, optional
+        Keep only the ``top_n`` most persistent basins after filtering. On a
+        near-global scan the surface has many small favorable micro-pockets, so
+        capping to the most persistent handful is usually how you get a
+        readable shortlist. None keeps all.
+    smooth_sigma : float, optional
+        Gaussian pre-smoothing (voxels). Leave None for these Boltzmann maps:
+        they are already smooth, and smoothing flattens ridges, which balloons
+        each watershed catchment and pulls peaks toward zero. Use a small value
+        only for visibly noisy fields.
     connectivity : int
         Voxel connectivity for the watershed (1 = faces/6-neighbour,
         3 = full/26-neighbour).
@@ -373,13 +390,11 @@ def find_hotspots(volmap, level=None, min_voxels=3, min_persistence=None,
         return (empty, np.zeros(field.shape, int)) if return_labels else empty
 
     seeds, pers, _ = _minima_persistence(field, mask)
-    if min_persistence is not None and seeds.shape[0]:
-        keep = pers >= float(min_persistence)
-        seeds, pers = seeds[keep], pers[keep]
     if seeds.shape[0] == 0:
         return (empty, np.zeros(field.shape, int)) if return_labels else empty
 
-    # Marker-controlled watershed: flood the favorable field from the minima.
+    # Marker-controlled watershed from ALL minima (see docstring): pruning
+    # markers first would let survivors flood the whole favorable region.
     markers = np.zeros(field.shape, dtype=np.int64)
     markers[seeds[:, 0], seeds[:, 1], seeds[:, 2]] = np.arange(1, len(seeds) + 1)
     structure = ndimage.generate_binary_structure(3, connectivity)
@@ -404,8 +419,13 @@ def find_hotspots(volmap, level=None, min_voxels=3, min_persistence=None,
         'volume_A3': sizes.astype(float) * (v ** 3),
         'x': centers[:, 0], 'y': centers[:, 1], 'z': centers[:, 2],
     })
-    df = df[df['n_voxels'] >= min_voxels].copy()
-    df = df.sort_values('persistence', ascending=False).reset_index(drop=True)
+    df = df[df['n_voxels'] >= min_voxels]
+    if min_persistence is not None:
+        df = df[df['persistence'] >= float(min_persistence)]
+    df = df.sort_values('persistence', ascending=False)
+    if top_n is not None:
+        df = df.head(int(top_n))
+    df = df.reset_index(drop=True)
     df.insert(0, 'rank', np.arange(1, len(df) + 1))
     df.attrs['level'] = thr
     return (df, labels) if return_labels else df
@@ -413,7 +433,7 @@ def find_hotspots(volmap, level=None, min_voxels=3, min_persistence=None,
 
 def attribute_hotspots_to_residues(volmap, receptor_pdb, level=None,
                                    min_voxels=3, min_persistence=None,
-                                   radius=4.0, smooth_sigma=None,
+                                   top_n=None, radius=4.0, smooth_sigma=None,
                                    selection='not name *H*'):
     '''
     Attribute each ranked hotspot to the receptor residues that line it.
@@ -431,10 +451,10 @@ def attribute_hotspots_to_residues(volmap, receptor_pdb, level=None,
         The probe map to segment (favorable = negative).
     receptor_pdb : str
         Receptor structure the map was built around.
-    level, min_voxels, min_persistence, smooth_sigma
-        Passed through to find_hotspots for segmentation. Set min_persistence
-        (with a small smooth_sigma) to attribute only the significant sites
-        rather than every watershed basin.
+    level, min_voxels, min_persistence, top_n, smooth_sigma
+        Passed through to find_hotspots for segmentation. Set top_n (and/or
+        min_persistence) to attribute only the most significant sites rather
+        than every watershed basin.
     radius : float
         A receptor atom lines a hotspot if within this distance (A) of any of
         the hotspot's voxels.
@@ -453,7 +473,7 @@ def attribute_hotspots_to_residues(volmap, receptor_pdb, level=None,
     cols = ['hotspot_rank', 'peak_value', 'chain', 'resid', 'resname',
             'min_dist', 'n_atoms']
     df, labels = find_hotspots(volmap, level=level, min_voxels=min_voxels,
-                               min_persistence=min_persistence,
+                               min_persistence=min_persistence, top_n=top_n,
                                smooth_sigma=smooth_sigma, return_labels=True)
     if df.empty:
         return pd.DataFrame(columns=cols)
