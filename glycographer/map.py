@@ -752,6 +752,7 @@ class ConsensusMap:
 
     _stack: np.ndarray = field(default=None, init=False)   # (n_probes, n_vox)
     _masked: np.ndarray = field(default=None, init=False)  # zeros -> NaN
+    _std_cache: np.ndarray = field(default=None, init=False)  # per-probe std'd
 
     def __post_init__(self):
         if len(self.maps) < 2:
@@ -784,6 +785,25 @@ class ConsensusMap:
             shape=ref.shape, origin=ref.origin, voxel_size=v,
             map_id=f'consensus_{tag}', map_type=f'consensus_{tag}')
 
+    def _standardized(self, method='percentile'):
+        '''
+        Per-probe favorability on a common scale (see
+        analysis.standardize_favorability): each probe's occupied voxels are
+        ranked against that probe's own distribution, so probes with different
+        absolute REU ranges become comparable. Higher = more favorable; voxels
+        a probe did not visit are NaN. Used by the cross-probe comparison
+        reductions (best_probe / support / selectivity), NOT by min/mean.
+        '''
+        if method == 'percentile' and self._std_cache is not None:
+            return self._std_cache
+        from glycographer.analysis import standardize_favorability
+        std = np.vstack([standardize_favorability(self._stack[p], method=method)
+                         for p in range(self._stack.shape[0])])
+        std = np.where(self._stack == 0.0, np.nan, std)   # absent -> NaN
+        if method == 'percentile':
+            self._std_cache = std
+        return std
+
     def consensus_min(self):
         '''Best-case favorability at each voxel (most favorable across probes).'''
         present = ~np.isnan(self._masked)
@@ -803,33 +823,70 @@ class ConsensusMap:
         mean = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
         return self._as_map(mean, 'mean')
 
-    def support_count(self, threshold=0.0):
+    def support_count(self, threshold=None, standardize=True):
         '''
-        Number of probes with a favorable value (< threshold) at each voxel.
-        A reproducibility/generalist filter: high count == many probes bind.
+        Number of probes that bind *strongly* at each voxel -- a
+        reproducibility / generalist-site filter (high count == many probes
+        agree here).
+
+        With standardize=True (default), a probe counts if this voxel is in its
+        own top fraction: `threshold` is a favorability percentile (default
+        0.9 = each probe's top 10%), which is comparable across probes whose
+        REU ranges differ. With standardize=False, `threshold` is a raw REU
+        cutoff (default 0.0) and a probe counts if its value is below it -- note
+        that with the mapper's floor this counts *any* favorable probe, which is
+        rarely what you want (hence standardize is the default).
         '''
-        counts = np.nansum(self._masked < threshold, axis=0)
+        if standardize:
+            thr = 0.9 if threshold is None else float(threshold)
+            counts = np.nansum(self._standardized() >= thr, axis=0)
+        else:
+            thr = 0.0 if threshold is None else float(threshold)
+            counts = np.nansum(self._masked < thr, axis=0)
         return self._as_map(counts.astype(float), 'support')
 
-    def best_probe(self):
+    def best_probe(self, standardize=True):
         '''
-        Identity map: 1-based index of the probe with the most favorable value
-        at each voxel (0 where no probe visits). Feeds anchor selection --
-        which fragment binds best where.
-        '''
-        all_nan = np.all(np.isnan(self._masked), axis=0)
-        filled = np.where(np.isnan(self._masked), np.inf, self._masked)
-        best = np.argmin(filled, axis=0) + 1
-        best[all_nan] = 0
-        return self._as_map(best.astype(float), 'best_probe')
+        Identity map: 1-based index of the probe that is most favorable at each
+        voxel (0 where no probe visits). Feeds anchor selection -- which
+        fragment binds best where.
 
-    def selectivity_entropy(self, beta=0.5):
+        With standardize=True (default) the winner is the probe for which this
+        voxel ranks highest in its *own* distribution, which removes the bias
+        toward probes with systematically deeper raw REU (larger/charged
+        fragments). With standardize=False the winner is the deepest raw REU.
         '''
-        Shannon entropy (nats) of the Boltzmann weights across probes at each
-        voxel. Low entropy == the site strongly prefers one probe (a
-        specificity determinant); high entropy == promiscuous. Empty voxels -> 0.
+        if standardize:
+            vals = self._standardized()
+            any_present = np.any(~np.isnan(vals), axis=0)
+            best = np.argmax(np.where(np.isnan(vals), -np.inf, vals), axis=0) + 1
+        else:
+            any_present = np.any(~np.isnan(self._masked), axis=0)
+            best = np.argmin(np.where(np.isnan(self._masked), np.inf,
+                                      self._masked), axis=0) + 1
+        best = best.astype(float)
+        best[~any_present] = 0
+        return self._as_map(best, 'best_probe')
+
+    def selectivity_entropy(self, standardize=True, beta=0.5):
         '''
-        w = np.exp(-beta * np.where(np.isnan(self._masked), np.inf, self._masked))
+        Shannon entropy (nats) of the per-probe favorability distribution at
+        each voxel. Low entropy == the site strongly prefers one probe (a
+        specificity determinant); high entropy == promiscuous / generalist.
+        Empty voxels -> 0.
+
+        With standardize=True (default), weights are each probe's standardized
+        favorability (percentile), so probes are compared on equal footing and
+        no temperature is needed -- this is the recommended path and resolves
+        the "what does beta mean here" ambiguity. With standardize=False,
+        weights are Boltzmann factors exp(-beta * REU) on the raw maps, where
+        beta sets the REU gap within which probes count as competitive.
+        '''
+        if standardize:
+            w = np.nan_to_num(self._standardized(), nan=0.0)
+        else:
+            w = np.exp(-beta * np.where(np.isnan(self._masked), np.inf,
+                                        self._masked))
         z = w.sum(axis=0)
         occupied = z > 0
         p = np.divide(w, z, out=np.zeros_like(w), where=occupied)
