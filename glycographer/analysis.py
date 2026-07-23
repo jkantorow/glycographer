@@ -7,9 +7,11 @@ GlycanDockEnsemble instance and do not require PyRosetta to execute.
 
 import numpy as np
 import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
 from scipy import ndimage
+
+# seaborn / matplotlib are imported lazily inside the plotting functions so
+# that importing this module (for map_stats, standardize_favorability,
+# find_hotspots, ...) stays lightweight -- map.py and dock.py depend on it.
 
 
 def map_stats(volmap, occupied_only=True):
@@ -52,6 +54,61 @@ def map_stats(volmap, occupied_only=True):
         'n_occupied': int(np.count_nonzero(values != 0.0)),
         'n_voxels': n_voxels,
     }
+
+
+def standardize_favorability(values, method='percentile'):
+    '''
+    Map raw energies (favorable = negative) to a per-distribution favorability
+    score in which higher = more favorable, so values can be compared *across*
+    probes/ensembles whose absolute REU ranges differ.
+
+    Why: raw REU is the right scale for absolute-depth questions (is this
+    location bindable), but for cross-probe comparison (which probe is
+    unusually good here, how selective is a site) it is biased -- a larger or
+    charged fragment has systematically deeper interaction energies everywhere.
+    Standardizing each probe against its *own* distribution removes that offset,
+    so the score means "favorable relative to this probe" rather than "deep in
+    absolute REU". This is the input the best_probe / support / selectivity
+    consensus reductions should use; keep raw REU for consensus_min/mean.
+
+    Only favorable (negative) values carry signal; non-negative values (the
+    0.0 empty sentinel and any positive residue) map to 0.0.
+
+    method
+      'percentile' (default): favorability percentile in (0, 1] over the
+          favorable values, 1 = most favorable in this distribution. Robust,
+          nonparametric, and directly interpretable as "top X% for this probe"
+          -- which is what makes a support-count threshold comparable across
+          probes.
+      'robust': (depth - median)/(1.4826*MAD) over favorable values; a signed,
+          outlier-resistant z-score of favorability.
+      'minmax': depth linearly scaled to [0, 1] between the least and most
+          favorable value (the legacy scale_inteng behavior; outlier-sensitive).
+
+    Returns an array shaped like ``values``.
+    '''
+    v = np.asarray(values, dtype=float)
+    out = np.zeros_like(v)
+    fav_mask = v < 0
+    if not fav_mask.any():
+        return out
+    depth = -v[fav_mask]                       # positive favorability
+
+    if method == 'percentile':
+        from scipy.stats import rankdata
+        r = rankdata(depth, method='average')
+        out[fav_mask] = r / r.max()            # (0, 1], 1 = most favorable
+    elif method == 'robust':
+        med = np.median(depth)
+        mad = np.median(np.abs(depth - med)) or 1.0
+        out[fav_mask] = (depth - med) / (1.4826 * mad)
+    elif method == 'minmax':
+        lo, hi = depth.min(), depth.max()
+        out[fav_mask] = (depth - lo) / (hi - lo) if hi > lo else 1.0
+    else:
+        raise ValueError(f"Unknown method {method!r}; choose 'percentile', "
+                         "'robust', or 'minmax'.")
+    return out
 
 
 def _favorable_field(volmap, smooth_sigma=None):
@@ -171,8 +228,12 @@ def choose_contour_levels(volmap, n=4, mode='absolute', step=1.0,
     return kept
 
 
-_HOTSPOT_COLS = ['rank', 'label_id', 'peak_value', 'mean_value', 'n_voxels',
-                 'volume_A3', 'x', 'y', 'z']
+_HOTSPOT_COLS = ['rank', 'label_id', 'peak_value', 'mean_value', 'persistence',
+                 'n_voxels', 'volume_A3', 'x', 'y', 'z']
+
+# Face-connectivity (6-neighbour) offsets for the persistence sweep.
+_NEIGHBOR_OFFSETS = ((1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                     (0, -1, 0), (0, 0, 1), (0, 0, -1))
 
 
 def _voxel_size(volmap):
@@ -182,82 +243,177 @@ def _voxel_size(volmap):
             else float(volmap.spacing))
 
 
-def _auto_level(volmap, fav, min_voxels, smooth_sigma):
-    '''Peak-resolution contour level from the component sweep (fallback: q30).'''
-    levels, counts = component_sweep(volmap, min_voxels=min_voxels,
-                                     smooth_sigma=smooth_sigma)
-    if counts.size and counts.max() > 0:
-        return float(levels[int(np.argmax(counts))])
-    return float(np.percentile(fav, 30))
-
-
-def find_hotspots(volmap, level=None, min_voxels=3, smooth_sigma=None,
-                  return_labels=False):
+def _minima_persistence(field, mask):
     '''
-    Segment a volume map into discrete hotspots and rank them.
+    Topological persistence of the local minima of a favorable field.
 
-    Thresholds the map at ``level`` (value < level), labels connected voxel
-    blobs, and returns one ranked row per blob. If ``level`` is None it is
-    chosen automatically as the peak-resolution level from component_sweep --
-    the level at which the most distinct sites appear -- so hotspots come out
-    separated rather than merged.
+    Sweeps the favorable voxels (``mask``) from most favorable (most negative
+    ``field``) upward with a union-find, growing one basin per local minimum.
+    When a voxel bridges two basins the *shallower* one (smaller depth) dies,
+    and its persistence is fixed at (its own depth - the depth at the merge
+    saddle). This is 0-D persistent homology of the sublevel sets: it measures
+    how deep a minimum is before it merges into a more favorable neighbor --
+    i.e. the contour-depth interval over which it survives as a *separate*
+    site. That is the formal version of the by-hand "diamonds within diamonds
+    until they merge" ranking, and it distinguishes a real isolated pocket
+    (high persistence) from a shallow dimple on the flank of a deeper basin
+    (low persistence) even when the dimple's absolute value is very negative.
+
+    Depth here is favorability = -field (positive, larger = more favorable).
+
+    Returns
+    -------
+    (seeds, persistence, depth)
+        seeds : (K, 3) int array, one seed voxel index per local minimum.
+        persistence : (K,) float, depth-until-merge of each minimum.
+        depth : (K,) float, the seed's own favorability (-field at the seed).
+    '''
+    fav = -np.asarray(field, dtype=float)          # favorable -> positive depth
+    coords = np.argwhere(mask)
+    if coords.shape[0] == 0:
+        return np.empty((0, 3), int), np.empty(0), np.empty(0)
+
+    order = np.argsort(-fav[mask])                 # deepest first
+    coords = coords[order]
+    vals = fav[mask][order]
+    shape = field.shape
+
+    comp = np.full(shape, -1, dtype=np.int64)      # component id per voxel
+    parent, birth, seed = [], [], []               # union-find state per root
+    persistence = {}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for (i, j, k), v in zip(coords, vals):
+        roots = set()
+        for di, dj, dk in _NEIGHBOR_OFFSETS:
+            ni, nj, nk = i + di, j + dj, k + dk
+            if (0 <= ni < shape[0] and 0 <= nj < shape[1]
+                    and 0 <= nk < shape[2] and comp[ni, nj, nk] != -1):
+                roots.add(find(int(comp[ni, nj, nk])))
+        if not roots:                              # new local minimum is born
+            cid = len(parent)
+            parent.append(cid); birth.append(v); seed.append((i, j, k))
+            comp[i, j, k] = cid
+        else:                                      # join / merge basins
+            survivor = max(roots, key=lambda r: birth[r])
+            comp[i, j, k] = survivor
+            for r in roots:
+                if r != survivor:
+                    persistence[r] = birth[r] - v  # shallower basin dies here
+                    parent[r] = survivor
+
+    n = len(parent)
+    seeds = np.array(seed, dtype=int) if n else np.empty((0, 3), int)
+    # Surviving basins never merged -> persist over their full depth.
+    pers = np.array([persistence.get(r, birth[r]) for r in range(n)])
+    depth = np.asarray(birth, dtype=float)
+    return seeds, pers, depth
+
+
+def find_hotspots(volmap, level=None, min_voxels=3, min_persistence=None,
+                  smooth_sigma=None, connectivity=1, return_labels=False):
+    '''
+    Segment a volume map into discrete hotspots and rank them by persistence.
+
+    Single-threshold connected-component labeling is unsuitable for a
+    near-global probe scan: the favorable region is a continuous shell over the
+    receptor, so thresholding merges every pocket connected by a favorable ridge
+    into one surface-spanning blob. Instead this:
+
+      1. finds the local minima of the favorable field and their topological
+         persistence (_minima_persistence),
+      2. optionally drops minima below ``min_persistence`` (prunes ripples),
+      3. uses the surviving minima as markers for a marker-controlled watershed
+         (skimage), which splits the favorable region into one basin per
+         minimum -- separating pockets that share a ridge.
 
     Each hotspot carries its peak (most favorable) and mean voxel value, its
-    size in voxels and in cubic Angstroms, and the world-space centroid (x, y, z)
-    of its voxels, which locates the site on the receptor for downstream residue
-    attribution. Rows are ranked by peak favorability (rank 1 = most negative).
-    ``label_id`` is the id of the blob in the labeled array, so a caller with
-    the labels (return_labels=True) can recover a hotspot's member voxels.
+    persistence (depth-until-merge -- the significance score), its size in
+    voxels and cubic Angstroms, and the world-space centroid (x, y, z). Rows are
+    ranked by persistence (rank 1 = most persistent/robust site), which reflects
+    "deep AND separate" rather than raw depth alone. ``label_id`` is the basin
+    id in the returned label array.
+
+    Parameters
+    ----------
+    level : float, optional
+        Restrict segmentation to voxels with value < level. Default None uses
+        all favorable (value < 0) voxels; set a negative level to focus on the
+        tail.
+    min_voxels : int
+        Drop basins smaller than this many voxels.
+    min_persistence : float, optional
+        Drop minima whose persistence is below this (in favorability units,
+        i.e. positive REU-like depth). None keeps all; filter afterward on the
+        returned 'persistence' column, or set to suppress shallow ripples.
+    connectivity : int
+        Voxel connectivity for the watershed (1 = faces/6-neighbour,
+        3 = full/26-neighbour).
 
     Returns
     -------
     pd.DataFrame with columns:
-        rank, label_id, peak_value, mean_value, n_voxels, volume_A3, x, y, z
-    If return_labels=True, returns (df, labels) where labels is the (nx, ny, nz)
-    integer label array (0 = background).
+        rank, label_id, peak_value, mean_value, persistence, n_voxels,
+        volume_A3, x, y, z
+    If return_labels=True, returns (df, labels) with the (nx, ny, nz) integer
+    basin-label array (0 = background / non-favorable).
     '''
+    from skimage.segmentation import watershed
+
     field = _favorable_field(volmap, smooth_sigma)
-    fav = field[field < 0]
+    thr = 0.0 if level is None else float(level)
+    mask = field < thr
     empty = pd.DataFrame(columns=_HOTSPOT_COLS)
-    if fav.size == 0:
-        return (empty, np.zeros(field.shape, dtype=int)) if return_labels else empty
+    if not mask.any():
+        return (empty, np.zeros(field.shape, int)) if return_labels else empty
 
-    if level is None:
-        level = _auto_level(volmap, fav, min_voxels, smooth_sigma)
+    seeds, pers, _ = _minima_persistence(field, mask)
+    if min_persistence is not None and seeds.shape[0]:
+        keep = pers >= float(min_persistence)
+        seeds, pers = seeds[keep], pers[keep]
+    if seeds.shape[0] == 0:
+        return (empty, np.zeros(field.shape, int)) if return_labels else empty
 
-    labels, n = ndimage.label(field < level)
-    if n == 0:
-        return (empty, labels) if return_labels else empty
+    # Marker-controlled watershed: flood the favorable field from the minima.
+    markers = np.zeros(field.shape, dtype=np.int64)
+    markers[seeds[:, 0], seeds[:, 1], seeds[:, 2]] = np.arange(1, len(seeds) + 1)
+    structure = ndimage.generate_binary_structure(3, connectivity)
+    labels = watershed(field, markers=markers, mask=mask, connectivity=structure)
 
-    idx = np.arange(1, n + 1)
-    sizes = np.bincount(labels.ravel())[1:]
-    peaks = ndimage.minimum(field, labels, idx)          # most favorable voxel
+    idx = np.arange(1, len(seeds) + 1)
+    sizes = np.bincount(labels.ravel(), minlength=len(seeds) + 1)[1:]
+    peaks = ndimage.minimum(field, labels, idx)
     means = ndimage.mean(field, labels, idx)
-    coms = ndimage.center_of_mass(field < level, labels, idx)  # (i, j, k) each
+    coms = np.atleast_2d(ndimage.center_of_mass(np.ones(field.shape), labels, idx))
 
     origin = np.asarray(volmap.origin, dtype=float)
     v = _voxel_size(volmap)
-    # Cell i has its lower corner at origin + i*v; use the voxel center.
-    coms = np.atleast_2d(coms)
-    centers = origin + (coms + 0.5) * v
+    centers = origin + (coms + 0.5) * v            # cell lower corner + half
 
     df = pd.DataFrame({
         'label_id': idx,
         'peak_value': np.asarray(peaks, dtype=float),
         'mean_value': np.asarray(means, dtype=float),
+        'persistence': np.asarray(pers, dtype=float),
         'n_voxels': sizes.astype(int),
         'volume_A3': sizes.astype(float) * (v ** 3),
         'x': centers[:, 0], 'y': centers[:, 1], 'z': centers[:, 2],
     })
     df = df[df['n_voxels'] >= min_voxels].copy()
-    df = df.sort_values('peak_value').reset_index(drop=True)
+    df = df.sort_values('persistence', ascending=False).reset_index(drop=True)
     df.insert(0, 'rank', np.arange(1, len(df) + 1))
-    df.attrs['level'] = level
+    df.attrs['level'] = thr
     return (df, labels) if return_labels else df
 
 
 def attribute_hotspots_to_residues(volmap, receptor_pdb, level=None,
-                                   min_voxels=3, radius=4.0, smooth_sigma=None,
+                                   min_voxels=3, min_persistence=None,
+                                   radius=4.0, smooth_sigma=None,
                                    selection='not name *H*'):
     '''
     Attribute each ranked hotspot to the receptor residues that line it.
@@ -275,8 +431,10 @@ def attribute_hotspots_to_residues(volmap, receptor_pdb, level=None,
         The probe map to segment (favorable = negative).
     receptor_pdb : str
         Receptor structure the map was built around.
-    level, min_voxels, smooth_sigma
-        Passed through to find_hotspots for segmentation.
+    level, min_voxels, min_persistence, smooth_sigma
+        Passed through to find_hotspots for segmentation. Set min_persistence
+        (with a small smooth_sigma) to attribute only the significant sites
+        rather than every watershed basin.
     radius : float
         A receptor atom lines a hotspot if within this distance (A) of any of
         the hotspot's voxels.
@@ -295,6 +453,7 @@ def attribute_hotspots_to_residues(volmap, receptor_pdb, level=None,
     cols = ['hotspot_rank', 'peak_value', 'chain', 'resid', 'resname',
             'min_dist', 'n_atoms']
     df, labels = find_hotspots(volmap, level=level, min_voxels=min_voxels,
+                               min_persistence=min_persistence,
                                smooth_sigma=smooth_sigma, return_labels=True)
     if df.empty:
         return pd.DataFrame(columns=cols)
@@ -349,6 +508,8 @@ def plot_component_sweep(volmap, min_voxels=3, smooth_sigma=None, ax=None):
     contours to draw and where they start to bleed). Marks the peak-resolution
     level chosen by 'components' mode.
     '''
+    import matplotlib.pyplot as plt
+
     levels, counts = component_sweep(volmap, min_voxels=min_voxels,
                                      smooth_sigma=smooth_sigma)
     if ax is None:
@@ -431,6 +592,9 @@ def plot_term_heatmaps(agg, terms=None, cluster=None, cmap='vlag',
     -------
     matplotlib.figure.Figure
     '''
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
     if cluster is not None and 'cluster_id' in agg.columns:
         agg = agg[agg.cluster_id == cluster]
     if terms is None:
@@ -478,6 +642,8 @@ def plot_interface_bars(agg):
     -------
     seaborn.axisgrid.FacetGrid
     '''
+    import seaborn as sns
+
     group_cols = [c for c in agg.columns if c not in ('term', 'weighted')]
     summed = (agg.groupby(group_cols, observed=True)['weighted']
                  .sum().reset_index())
