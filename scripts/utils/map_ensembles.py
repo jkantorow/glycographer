@@ -202,6 +202,7 @@ def build_flat(args):
         'outdir': args.outdir,
         'consensus': args.consensus,
         'write_json': not args.no_json,
+        'manifest_format': args.manifest_format,
     }
     return global_cfg, jobs
 
@@ -291,9 +292,16 @@ def run(global_cfg, jobs):
                                           'dx': os.path.abspath(dx)})
             print(f'Consensus [{tag}] {red} over {labels} -> {dx}')
 
-    manifest_path = os.path.join(outdir, 'map_manifest.json')
-    with open(manifest_path, 'w') as f:
-        json.dump(manifest, f, indent=2)
+    fmt = str(global_cfg.get('manifest_format') or 'json').lower()
+    if fmt in ('yaml', 'yml'):
+        import yaml
+        manifest_path = os.path.join(outdir, 'map_manifest.yaml')
+        with open(manifest_path, 'w') as f:
+            yaml.safe_dump(manifest, f, sort_keys=False, default_flow_style=False)
+    else:
+        manifest_path = os.path.join(outdir, 'map_manifest.json')
+        with open(manifest_path, 'w') as f:
+            json.dump(manifest, f, indent=2)
     print(f'Wrote manifest to {manifest_path}')
 
 
@@ -357,6 +365,10 @@ def main():
                              + ' '.join(DEFAULT_CONSENSUS) + '.')
     parser.add_argument('--no-json', action='store_true',
                         help='Do not write per-map JSON metadata sidecars.')
+    parser.add_argument('--manifest-format', choices=['json', 'yaml'],
+                        default='json',
+                        help='Format for the run manifest (default: json). '
+                             'yaml requires pyyaml.')
 
     args = parser.parse_args()
 
@@ -365,6 +377,7 @@ def main():
         global_cfg.setdefault('voxel_size', 1.0)
         global_cfg.setdefault('padding', 5.0)
         global_cfg.setdefault('outdir', '.')
+        global_cfg.setdefault('manifest_format', 'json')
     else:
         if not args.posedirs:
             parser.error('Provide one or more pose directories, or --config.')
