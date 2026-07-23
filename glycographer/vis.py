@@ -246,24 +246,34 @@ def draw_mapped_surface(rec_name: str, map_name: str,
     return ramp_name
 
 @cmd.extend
-def show_hotspots(map_dx: str, level=None, min_voxels=3, smooth_sigma=None):
+def show_hotspots(map_dx: str, top_n=15, level=None, min_voxels=3,
+                  min_persistence=None, smooth_sigma=None):
     '''
     Segment a map into discrete hotspots and mark each ranked centroid as a
-    labeled pseudoatom sphere (rank 1 = most favorable). Prints the ranked
-    hotspot table (peak/mean energy, size, world-space centroid).
+    labeled pseudoatom sphere (rank 1 = most persistent). Prints the ranked
+    hotspot table (peak/mean energy, persistence, size, world-space centroid).
 
-    If level is None it is chosen automatically at the level where the most
-    distinct sites resolve (analysis.find_hotspots via the component sweep).
+    Hotspots come from persistence-ranked local minima + a marker-controlled
+    watershed (analysis.find_hotspots). A near-global scan has many small
+    favorable micro-pockets, so the interactive default caps the display to the
+    top_n=15 most persistent sites. smooth_sigma defaults to None on purpose:
+    these Boltzmann maps are already smooth, and smoothing balloons the basins
+    and pulls peaks toward zero. To narrow further, raise min_persistence or
+    lower top_n; to see everything, set top_n=None.
     '''
     from glycographer.map import VolMap
     from glycographer.analysis import find_hotspots
 
+    top_n = int(top_n) if top_n not in (None, 'None', '') else None
     level = float(level) if level not in (None, 'None') else None
     min_voxels = int(min_voxels)
-    smooth_sigma = float(smooth_sigma) if smooth_sigma else None
+    min_persistence = (float(min_persistence)
+                       if min_persistence not in (None, 'None', '') else None)
+    smooth_sigma = float(smooth_sigma) if smooth_sigma not in (None, 'None', '') else None
 
     volmap = VolMap.from_dx(map_dx)
     df = find_hotspots(volmap, level=level, min_voxels=min_voxels,
+                       min_persistence=min_persistence, top_n=top_n,
                        smooth_sigma=smooth_sigma)
     map_name = os.path.basename(map_dx).replace('.dx', '')
     if df.empty:
@@ -286,7 +296,9 @@ def show_hotspots(map_dx: str, level=None, min_voxels=3, smooth_sigma=None):
 
 @cmd.extend
 def show_hotspot_residues(map_dx: str, receptor_pdb: str, rank=1, radius=4.0,
-                          level=None, min_voxels=3, highlight='orange'):
+                          top_n=15, level=None, min_voxels=3,
+                          min_persistence=None, smooth_sigma=None,
+                          highlight='orange'):
     '''
     Attribute a hotspot to its lining receptor residues (geometry only) and
     display them: shows those residues as sticks, colors and labels them, and
@@ -295,13 +307,21 @@ def show_hotspot_residues(map_dx: str, receptor_pdb: str, rank=1, radius=4.0,
     Pass rank='all' to display the lining residues of every hotspot. The
     receptor is loaded (as a surface) if not already present. Answers "which
     residues line hotspot N of this probe" -- the design-guidance view.
+
+    Uses the same interactive segmentation defaults as show_hotspots
+    (top_n=15, smooth_sigma=None) so attribution runs on the significant sites,
+    not every watershed basin.
     '''
     from glycographer.map import VolMap
     from glycographer.analysis import attribute_hotspots_to_residues
 
     radius = float(radius)
     min_voxels = int(min_voxels)
+    top_n = int(top_n) if top_n not in (None, 'None', '') else None
     level = float(level) if level not in (None, 'None') else None
+    min_persistence = (float(min_persistence)
+                       if min_persistence not in (None, 'None', '') else None)
+    smooth_sigma = float(smooth_sigma) if smooth_sigma not in (None, 'None', '') else None
 
     rec_name = os.path.basename(receptor_pdb).replace('.pdb', '')
     if rec_name not in cmd.get_names('objects'):
@@ -309,7 +329,10 @@ def show_hotspot_residues(map_dx: str, receptor_pdb: str, rank=1, radius=4.0,
 
     volmap = VolMap.from_dx(map_dx)
     att = attribute_hotspots_to_residues(volmap, receptor_pdb, level=level,
-                                         min_voxels=min_voxels, radius=radius)
+                                         min_voxels=min_voxels,
+                                         min_persistence=min_persistence,
+                                         top_n=top_n, smooth_sigma=smooth_sigma,
+                                         radius=radius)
     if att.empty:
         print('No lining residues found (no hotspots or none within radius).')
         return att
@@ -374,8 +397,9 @@ def draw_best_probe_surface(rec_name: str, best_probe_map: str, probe_labels):
     return ramp_name
 
 
-def draw_probe_shells(map_dxs, probe_labels=None, n=3, mode='absolute',
-                      step=2.0, smooth_sigma=None, as_mesh=True):
+@cmd.extend
+def draw_probe_shells(map_source, probe_labels=None, n=3, mode='absolute',
+                      step=2.0, smooth_sigma=None, as_mesh=1):
     '''
     Overlay several probes' favorability maps as nested, color-coded "shells".
 
@@ -393,40 +417,72 @@ def draw_probe_shells(map_dxs, probe_labels=None, n=3, mode='absolute',
     projection of binding depth, giving the concentric-shell effect without any
     per-vertex alpha.
 
-    Not @cmd.extend (takes a list of maps -> call from a script/notebook). For a
-    clean figure, pass 2-3 probes of interest rather than all of them.
+    For a clean figure, point at 2-3 probes of interest rather than all of them.
 
     Parameters
     ----------
-    map_dxs : list of str
-        Per-probe .dx map paths (favorable = negative). Paths are needed (not
-        loaded object names) so contour levels can be computed from the array.
-    probe_labels : list of str, optional
-        Labels matching map_dxs, used for colors and object names. Defaults to
-        each map's basename.
+    map_source : str or list of str
+        The per-probe .dx maps (favorable = negative). Accepts, in order:
+          * a directory  -- every '*.dx' in it except 'consensus_*' maps;
+          * a glob pattern ('maps/*_boltzmann_b0p5.dx');
+          * a list of paths (script/notebook use).
+        From the PyMOL command line a string is required (PyMOL cannot pass a
+        Python list); a glob/dir is also space-safe, unlike splitting a
+        space-joined string, so it works with paths that contain spaces.
+    probe_labels : list of str, or comma/space-separated str, optional
+        Labels matching the resolved maps, used for colors and object names.
+        Defaults to each map's filename. Falls back to filenames if the count
+        does not match the number of maps.
     n, mode, step, smooth_sigma
         Passed to analysis.choose_contour_levels (see it for the level modes).
-    as_mesh : bool
-        Wireframe isomesh (default, see-through) vs solid isosurface.
+    as_mesh : bool-ish
+        Wireframe isomesh (default, see-through) vs solid isosurface. Accepts
+        1/0 or true/false from the command line.
 
     Returns
     -------
     dict {probe_label: [contour object names]}
     '''
+    import glob
+    import re
     from glycographer.map import VolMap
     from glycographer.analysis import choose_contour_levels
     from glycographer.colors import probe_palette, rgb_to_hex
 
+    # Resolve map_source (directory | glob | list) -> list of .dx paths.
+    if isinstance(map_source, str):
+        if os.path.isdir(map_source):
+            paths = sorted(glob.glob(os.path.join(map_source, '*.dx')))
+        else:
+            paths = sorted(glob.glob(map_source))
+        paths = [p for p in paths
+                 if not os.path.basename(p).startswith('consensus')]
+    else:
+        paths = list(map_source)
+    if not paths:
+        print(f'draw_probe_shells: no maps resolved from {map_source!r}.')
+        return {}
+
+    # Labels: list, comma/space-separated string, or default to filenames.
     if probe_labels is None:
-        probe_labels = [os.path.basename(p).replace('.dx', '') for p in map_dxs]
-    pal = probe_palette(probe_labels)
+        probe_labels = [os.path.basename(p).replace('.dx', '') for p in paths]
+    elif isinstance(probe_labels, str):
+        probe_labels = [s for s in re.split(r'[,\s]+', probe_labels.strip()) if s]
+    if len(probe_labels) != len(paths):
+        print(f'draw_probe_shells: {len(probe_labels)} labels for {len(paths)} '
+              'maps; using filenames instead.')
+        probe_labels = [os.path.basename(p).replace('.dx', '') for p in paths]
 
     n = int(n)
     step = float(step)
-    smooth_sigma = float(smooth_sigma) if smooth_sigma else None
+    smooth_sigma = (float(smooth_sigma)
+                    if smooth_sigma not in (None, 'None', '') else None)
+    as_mesh = str(as_mesh).strip().lower() not in ('0', 'false', 'no', 'off')
+
+    pal = probe_palette(probe_labels)
 
     all_names = {}
-    for dx, label in zip(map_dxs, probe_labels):
+    for dx, label in zip(paths, probe_labels):
         volmap = VolMap.from_dx(dx)
         levels = choose_contour_levels(volmap, n=n, mode=mode, step=step,
                                        smooth_sigma=smooth_sigma)
