@@ -373,6 +373,96 @@ def draw_best_probe_surface(rec_name: str, best_probe_map: str, probe_labels):
 
     return ramp_name
 
+
+def draw_probe_shells(map_dxs, probe_labels=None, n=3, mode='absolute',
+                      step=2.0, smooth_sigma=None, as_mesh=True):
+    '''
+    Overlay several probes' favorability maps as nested, color-coded "shells".
+
+    For each probe map, isocontours are drawn at programmatically chosen levels
+    (analysis.choose_contour_levels), colored by a distinct colorblind-safe
+    probe color (colors.probe_palette) shaded by depth (deepest = full color,
+    shallower = toward white). Rendered as wireframe mesh by default so probes
+    that overlap at the same site remain mutually visible.
+
+    This is the "see every probe's binding depth at one location" view, and the
+    complement to draw_best_probe_surface (which shows only the winning probe
+    per voxel). PyMOL cannot vary a *surface's* transparency by spatial location,
+    so mesh -- not opacity -- is what lets the inner shells show through; the
+    base color encodes probe identity and the color intensity encodes the 2-D
+    projection of binding depth, giving the concentric-shell effect without any
+    per-vertex alpha.
+
+    Not @cmd.extend (takes a list of maps -> call from a script/notebook). For a
+    clean figure, pass 2-3 probes of interest rather than all of them.
+
+    Parameters
+    ----------
+    map_dxs : list of str
+        Per-probe .dx map paths (favorable = negative). Paths are needed (not
+        loaded object names) so contour levels can be computed from the array.
+    probe_labels : list of str, optional
+        Labels matching map_dxs, used for colors and object names. Defaults to
+        each map's basename.
+    n, mode, step, smooth_sigma
+        Passed to analysis.choose_contour_levels (see it for the level modes).
+    as_mesh : bool
+        Wireframe isomesh (default, see-through) vs solid isosurface.
+
+    Returns
+    -------
+    dict {probe_label: [contour object names]}
+    '''
+    from glycographer.map import VolMap
+    from glycographer.analysis import choose_contour_levels
+    from glycographer.colors import probe_palette, rgb_to_hex
+
+    if probe_labels is None:
+        probe_labels = [os.path.basename(p).replace('.dx', '') for p in map_dxs]
+    pal = probe_palette(probe_labels)
+
+    n = int(n)
+    step = float(step)
+    smooth_sigma = float(smooth_sigma) if smooth_sigma else None
+
+    all_names = {}
+    for dx, label in zip(map_dxs, probe_labels):
+        volmap = VolMap.from_dx(dx)
+        levels = choose_contour_levels(volmap, n=n, mode=mode, step=step,
+                                       smooth_sigma=smooth_sigma)
+        if not levels:
+            print(f'{label}: no favorable (negative) voxels; skipping.')
+            continue
+
+        map_name = load_volmap_from_dx(dx)
+        base = pal[label]
+        # Shade deepest level at full probe color, shallower toward white
+        # (double the span so the shallowest shell stays visible, matching
+        # draw_map_contours).
+        lo, hi = min(levels), max(levels)
+        span = hi - lo
+        lvl_range = (lo, hi + span) if span > 0 else (lo, lo + 1.0)
+
+        names = []
+        for i, lvl in enumerate(levels):
+            cname = f'shell_{label}_{i}'
+            if as_mesh:
+                cmd.isomesh(cname, map_name, float(lvl))
+            else:
+                cmd.isosurface(cname, map_name, float(lvl))
+            rgb = color_by_magnitude(base, lvl, lvl_range, negative_is_better=True)
+            color_name = f'shellcol_{label}_{i}'
+            cmd.set_color(color_name, list(rgb))
+            cmd.color(color_name, cname)
+            names.append(cname)
+
+        cmd.group(f'shells_{label}', ' '.join(names))
+        all_names[label] = names
+        print(f'{label}: {len(names)} shells at '
+              f'{[round(l, 2) for l in levels]} (probe color {rgb_to_hex(*base)})')
+
+    return all_names
+
 @cmd.extend
 def extract_pose_clusters(ens_name: str, scoredata:str):
     '''
