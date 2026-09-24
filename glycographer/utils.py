@@ -72,6 +72,6 @@ def init_glycandock(complex, nstruct=1, n_cycles=1, native=None, options=None):
     from pyrosetta import init
 
     if not options:
-        options = os.path.join('..', 'config', 'glycandock_defaults.init')
+        options = os.path.join(os.path.abspath(__file__), '..', 'config', 'glycandock_defaults.init')
     
     init(f'{in_flags} @{options}')
