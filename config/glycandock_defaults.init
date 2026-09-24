@@ -10,6 +10,7 @@
 -ex1
 -ex2
 
+-in:auto_setup_metals
 -ignore_unrecognized_res
 -ignore_zero_occupancy false
 -load_PDB_components false
