@@ -26,6 +26,7 @@ glycoligand.
 '''
 
 import argparse
+import sys
 import os
 
 from pyrosetta import pose_from_pdb, Vector1
@@ -33,6 +34,12 @@ from pyrosetta.rosetta.protocols.rigid import RigidBodyRandomizeMover, partner_d
 from pyrosetta.rosetta.protocols.docking import setup_foldtree
 from pyrosetta.rosetta.protocols.ligand_docking import StartFrom
 from pyrosetta.rosetta.protocols.glycan_docking import GlycanDockProtocol
+
+# The glycographer package isn't pip-installed (in-development repo), so the
+# repo root must be on sys.path. This script lives at <repo>/scripts/utils/.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from glycographer.utils import init_glycandock
 
