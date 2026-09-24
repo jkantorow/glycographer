@@ -53,3 +53,25 @@ def build_pose_list(posedir, poserange=None):
     # rather than lexicographic (matters once ids exceed the zero-pad width).
     return sorted(selected,
                   key=lambda p: int(POSE_NUM_RE.search(os.path.basename(p)).group(1)))
+
+
+def init_glycandock(complex, nstruct=1, n_cycles=1, native=None, options=None):
+    '''
+    Start Rosetta session with necessary structure and
+    options input.
+    '''
+    in_flags = f'''
+    -in:file:s {complex}
+    -nstruct {nstruct}
+    -n_cycles {n_cycles}
+    '''
+    if native is not None:
+        ''.join([in_flags, f'-in:file:native {native}'])
+
+    # Lazy import init so that utils.py can be imported without having pyrosetta installed
+    from pyrosetta import init
+
+    if not options:
+        options = os.path.join('..', 'config', 'glycandock_defaults.init')
+    
+    init(f'{in_flags} @{options}')
