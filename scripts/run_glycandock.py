@@ -25,50 +25,16 @@ glycoligand.
     - n number of output structures for each sampling point
 '''
 
-from pyrosetta import init, pose_from_pdb, Vector1
+import argparse
+import os
+
+from pyrosetta import pose_from_pdb, Vector1
 from pyrosetta.rosetta.protocols.rigid import RigidBodyRandomizeMover, partner_downstream
 from pyrosetta.rosetta.protocols.docking import setup_foldtree
 from pyrosetta.rosetta.protocols.ligand_docking import StartFrom
 from pyrosetta.rosetta.protocols.glycan_docking import GlycanDockProtocol
-import argparse
-import os
 
-def init_glycandock(complex, nstruct=1, mc_cycles=1, options=None):
-    '''
-    Start Rosetta session with necessary structure and
-    options input.
-    '''
-    in_flags = f'''
-    -in:file:s {complex}
-    -nstruct {nstruct}
-    -n_cycles {mc_cycles}
-    '''
-    if not options:
-        options = '''
-        -include_sugars
-        -auto_detect_glycan_connections
-        -alternate_3_letter_codes pdb_sugar
-        -write_pdb_link_records
-        -maintain_links
-        -docking:partners A_X
-
-        -ex1
-        -ex2
-
-        -ignore_unrecognized_res
-        -ignore_zero_occupancy false
-        -load_PDB_components false
-        -no_fconfig
-        '''
-        options = ' '.join(options.split('\n'))
-        init(f'{in_flags} {options}')
-    else:
-        init(f'{in_flags} @{options}')
-    
-# How do we best define the movers for startfrom, prepack, and full protocol?
-# Do we just run the process mostly in the main script?
-    # I'm not seeing great ways to wrap a lot of this into functions.
-# Better established outfile naming convention (rec_lig_startpoint_iter)?
+from glycographer.utils import init_glycandock
 
 def main():
     
@@ -83,10 +49,12 @@ def main():
                         'chain id X is found, include the glycoligand structure as a pdb file with the -lig flag.')
     parser.add_argument('-n', '--nstruct', type=int, default=1,
                         help='The desired number of sampled and scored poses to output in PDB format (default: 1)')
-    parser.add_argument('-grid', '--meshgrid', type=str, required=False,
+    parser.add_argument('-grid', '--grid', type=str, required=False,
                         help='Filename of the sampling grid to use for energy landscape mapping (Not required if refining a predetermined input pose).')
     parser.add_argument('-o', '--outprefix', type=str, required=False,
                         help='Prefix appended to the beginning of all output files.')
+    parser.add_argument('--native', type=str, default=None,
+                        help='Native crystal protein-glycan complex pose to compare decoys to if one is known (default: None)')
     parser.add_argument('--no-random-start', action='store_true',
                         help='Specify to not randomize input glycoligand orientation before running GlycanDockProtocol')
     parser.add_argument('--start-count-from', type=int, default=1,
@@ -95,12 +63,8 @@ def main():
                         help='Only perform GlycanDockProtocol stage 2 on input structure (prepacking is performed regardless).')
     parser.add_argument('--options', type=str, default=None,
                         help='Rosetta input options to provide as a file or as a string of flags (default flags are used for glycan docking if not provided).')
-    parser.add_argument('--mc-cycles', type=int, default=1,
-                        help='Number of Monte Carlo cycles to perform before outputting the final structure for each instance of GlycanDock' \
-                        'Note: the GlycanDockProtocol mover only outputs structures with an interface score less than 0 by default' \
-                        'and uses a filter to automatically repeat the protocol up to three times if a positive interface' \
-                        'score is obtained before sampling a new pose. So, for example, if you specify a cycle number of 3,' \
-                        'the protocol might re-execute up to 9 times if repeated unfavorable scores are obtained.')
+    parser.add_argument('--n-cycles', type=int, required=False,
+                        help='Number of GlycanDock stage 2 outer ramping cycles to perform during sampling (GlycanDock default is 10, but Glycographer defaults to 1 for probe sampling)')
     
     args = parser.parse_args()
 
@@ -121,6 +85,7 @@ def main():
 
     # Define GlycanDockProtcol Stage 2 parameters:
     s2_only = True if args.refine_only else False # Bypass stage 1 sampling
+    n_cycles = args.n_cycles if args.n_cycles else 1 if args.grid else 10 # Number of stage 2 sfxn ramping cycles to perform
     s2_t_mag = 0.2 if args.meshgrid else 0.5 # Angstroms max (?) from pose com obtained after stage 1
     s2_r_mag = 45.0 if args.meshgrid else 7.5 # Degrees max (?) about pose com obtained after stage 1
     n_rb_rounds = 20 if args.meshgrid else 8 # Number of rigid body translation/rotation MC moves to perform during stage 2
@@ -132,14 +97,13 @@ def main():
     ramp_sfxn = True # Alter REF15 params for stage 2 based on FlexPepDock accuracy
 
     # We have to init Rosetta for each unique receptor-ligand combination:
-        
-    init_glycandock(args.complex, nstruct=args.nstruct, mc_cycles=args.mc_cycles, options=args.options)
+    init_glycandock(args.complex, nstruct=args.nstruct, n_cycles=n_cycles, native=args.native, options=args.options)
 
     # Instantiate StartFrom mover if a docking grid is provided:
     if args.meshgrid:
         start_from_grid = StartFrom()
         start_from_grid.chain('X')
-        start_from_grid.parse_pdb_file(args.meshgrid)
+        start_from_grid.parse_pdb_file(args.grid)
     
     # Instantiate prepacking mover:
     gdock_prepack = GlycanDockProtocol()
@@ -173,7 +137,7 @@ def main():
         complex_pose = pose_from_pdb(args.complex)
         
         # Move the glycoligand to a starting coordinate if a grid was specified:
-        if args.meshgrid:
+        if args.grid:
             start_from_grid.apply(complex_pose)
         
         # Randomize the orientation of the glycoligand before docking if specified:
@@ -191,23 +155,14 @@ def main():
         gdock_full.apply(complex_pose)
 
         # Extract the sampled pose as a pdb file:
-        rec_lig = os.path.basename(args.complex).replace('.pdb', '')
         if not args.outprefix or args.outprefix == "":
+            rec_lig = os.path.basename(args.complex).replace('.pdb', '')
             outname = f'{rec_lig}_{str(i).zfill(4)}.pdb'
         else:
             outname = f'{args.outprefix}_{str(i).zfill(4)}.pdb'
         complex_pose.dump_pdb(outname)
 
-        # 1. Need to think about how to make sure this is working
-        # the same way as what is specified by the xml protocol.
-        # 2. Would it make more sense to generate rotations manually
-        # instead of relying on the random rb rotation moves?
-        # - 2a. This would allow us to specify the rot sampling more
-        #   robustly.
-        # 3. StartFrom still chooses coords randomly: can we use a
-        # different method to specify exactly how many times each
-        # grid point should be sampled and at what rb rotations?
-        # 4. Can any of this be refactored into functions?
+        # Question: can any of this be refactored into a module file and then called into this script (and others)?
 
 if __name__ == '__main__':
     exit(main())
