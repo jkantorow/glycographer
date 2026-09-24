@@ -83,7 +83,7 @@ def main():
     # Define GlycanDockProtocol Stage 1 parameters:
     s1_rot_com = False if args.refine_only else True # Whether or not to rotate the glycoligand around its com during stage 1
     s1_t_mag = 0.5 # Angstroms max (?) from start coord
-    s1_r_mag = 180.0 if args.meshgrid else 7.5 # Degrees max (?) about start coord in roh, theta, or phi (?)
+    s1_r_mag = 180.0 if args.grid else 7.5 # Degrees max (?) about start coord in roh, theta, or phi (?)
     s1_tor_pert_mag = 12.5 # Degrees max (?) each glycosidic linkage is torsionally rotated
 
     # Specify how GlycanDockProtocol will perform Monte Carlo moves:
@@ -93,9 +93,9 @@ def main():
     # Define GlycanDockProtcol Stage 2 parameters:
     s2_only = True if args.refine_only else False # Bypass stage 1 sampling
     n_cycles = args.n_cycles if args.n_cycles else 1 if args.grid else 10 # Number of stage 2 sfxn ramping cycles to perform
-    s2_t_mag = 0.2 if args.meshgrid else 0.5 # Angstroms max (?) from pose com obtained after stage 1
-    s2_r_mag = 45.0 if args.meshgrid else 7.5 # Degrees max (?) about pose com obtained after stage 1
-    n_rb_rounds = 20 if args.meshgrid else 8 # Number of rigid body translation/rotation MC moves to perform during stage 2
+    s2_t_mag = 0.2 if args.grid else 0.5 # Angstroms max (?) from pose com obtained after stage 1
+    s2_r_mag = 45.0 if args.grid else 7.5 # Degrees max (?) about pose com obtained after stage 1
+    n_rb_rounds = 20 if args.grid else 8 # Number of rigid body translation/rotation MC moves to perform during stage 2
     n_tor_rounds = 20 # Number of torsional MC moves to perform during stage 2
 
     # Specify how Rosetta will prepack each structure and deploy the score function: 
@@ -107,7 +107,7 @@ def main():
     init_glycandock(args.complex, nstruct=args.nstruct, n_cycles=n_cycles, native=args.native, options=args.options)
 
     # Instantiate StartFrom mover if a docking grid is provided:
-    if args.meshgrid:
+    if args.grid:
         start_from_grid = StartFrom()
         start_from_grid.chain('X')
         start_from_grid.parse_pdb_file(args.grid)
