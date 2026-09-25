@@ -38,11 +38,38 @@ Staging
 
 from dataclasses import dataclass, asdict, replace, fields
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, get_type_hints
 import json
 import os
 import time
 import zlib
+
+_TRUE = {'true', 't', 'yes', 'y', '1', 'on'}
+_FALSE = {'false', 'f', 'no', 'n', '0', 'off'}
+
+
+def _coerce(field_type, raw: str, key: str):
+    '''
+    Coerce a CLI string to a config field's declared type.
+
+    bool is special-cased because bool('false') is True -- silently turning
+    `--set ramp_sf=false` into ramp_sf=True would change the score function
+    without any visible error.
+    '''
+    if field_type is bool:
+        low = raw.lower()
+        if low in _TRUE:
+            return True
+        if low in _FALSE:
+            return False
+        raise ValueError(
+            f'{key}: expected a boolean, got {raw!r} '
+            f'(try true/false)')
+    try:
+        return field_type(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f'{key}: cannot read {raw!r} as {field_type.__name__}: {e}')
 
 # --- option file locations -------------------------------------------------
 # config/ currently lives at the repo root, beside the package. Under the
@@ -199,6 +226,29 @@ class GlycanDockConfig:
 
     def replace(self, **changes) -> 'GlycanDockConfig':
         '''Return a copy with `changes` applied (the config is frozen).'''
+        return replace(self, **changes)
+
+    def with_overrides(self, pairs: Sequence[str]) -> 'GlycanDockConfig':
+        '''
+        Apply "field=value" strings, coercing each value to the field's
+        declared type. Backs the CLI's repeatable --set flag, so any protocol
+        parameter can be swept without adding a flag per field.
+
+        >>> GlycanDockConfig.probe().with_overrides(['n_cycles=3', 'ramp_sf=false'])
+        '''
+        hints = get_type_hints(type(self))
+        changes = {}
+        for pair in pairs:
+            if '=' not in pair:
+                raise ValueError(
+                    f'--set expects field=value, got {pair!r}')
+            key, _, raw = pair.partition('=')
+            key, raw = key.strip(), raw.strip()
+            if key not in hints:
+                valid = ', '.join(sorted(hints))
+                raise ValueError(
+                    f'unknown config field {key!r}. Valid fields: {valid}')
+            changes[key] = _coerce(hints[key], raw, key)
         return replace(self, **changes)
 
     def diff(self, other: 'GlycanDockConfig') -> Dict:
@@ -364,6 +414,49 @@ def block_seed(run_id: str, block_index: int) -> int:
     '''
     key = f'{run_id}:{block_index}'.encode()
     return (zlib.crc32(key) & 0x7fffffff) or 1
+
+
+def block_slice(total: int, n_blocks: int, block_index: int,
+                start: int = 1) -> List[int]:
+    '''
+    Decoy indices belonging to one block of a split run.
+
+    Replaces the manual --start-count-from bookkeeping: give the total decoy
+    count and how many blocks to split it into, and each SLURM array task asks
+    for its own slice. Coverage is exact -- the blocks partition
+    [start, start + total) with no gaps and no overlaps -- so two tasks can
+    never write the same output file, and no decoy is silently dropped when
+    `total` is not divisible by `n_blocks` (the remainder is spread one extra
+    decoy at a time across the leading blocks rather than dumped on the last).
+
+    Parameters
+    ----------
+    total : int
+        Total decoys across the whole run.
+    n_blocks : int
+        Number of blocks (i.e. array tasks) to split across.
+    block_index : int
+        Which block to return, 0-based (i.e. $SLURM_ARRAY_TASK_ID).
+    start : int
+        Index of the first decoy of the whole run (default 1).
+
+    Returns
+    -------
+    list of int : this block's decoy indices. May be empty if n_blocks exceeds
+        total, which is not an error -- that task simply has nothing to do.
+    '''
+    if total < 1:
+        raise ValueError(f'total must be >= 1, got {total}')
+    if n_blocks < 1:
+        raise ValueError(f'n_blocks must be >= 1, got {n_blocks}')
+    if not 0 <= block_index < n_blocks:
+        raise ValueError(
+            f'block_index must be in [0, {n_blocks}), got {block_index}')
+
+    base, remainder = divmod(total, n_blocks)
+    offset = block_index * base + min(block_index, remainder)
+    size = base + (1 if block_index < remainder else 0)
+    return list(range(start + offset, start + offset + size))
 
 
 def _seed_flags(seed: Optional[int]) -> str:
