@@ -155,12 +155,16 @@ class GlycanDockConfig:
     #   stage2_trans_mag           0.5     0.2           0.5
     #   stage2_rot_mag             7.5    45.0           7.5
     #   rb_rounds                    8      20             8
-    #   tor_rounds                   8      20            20
+    #   tor_rounds                   8      20             8
     #
     # Note `tor_rounds`: the old script set n_torsion_rounds = 20
-    # unconditionally, so past *refinement* runs also used 20 rather than the
-    # publication's 8. That is preserved here deliberately -- changing it is a
-    # protocol decision, not a side effect of the refactor.
+    # unconditionally, so it applied to refinement as well as probe sampling,
+    # although only probe sampling wanted it. `probe` keeps 20 because the
+    # existing glycographer ensembles were generated with it. `refinement`
+    # uses the publication's 8, since no refinement ensembles predate this
+    # module and there is nothing to stay comparable with -- measured on a
+    # 5-residue branched glycan with two sialic acids, 20 rounds cost roughly
+    # 1.75x the wall time of 8 for no documented benefit.
 
     @classmethod
     def probe(cls, **overrides) -> 'GlycanDockConfig':
@@ -200,7 +204,7 @@ class GlycanDockConfig:
             stage2_trans_mag=0.5,
             stage2_rot_mag=7.5,
             rb_rounds=8,
-            tor_rounds=20,
+            tor_rounds=8,
         )
         base.update(overrides)
         return cls(**base)
