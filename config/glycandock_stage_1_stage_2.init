@@ -1,5 +1,4 @@
 -include_sugars
--auto_detect_glycan_connections
 -alternate_3_letter_codes pdb_sugar
 -write_glycan_pdb_codes
 -write_pdb_link_records
@@ -13,5 +12,4 @@
 -in:auto_setup_metals
 -ignore_unrecognized_res
 -ignore_zero_occupancy false
--load_PDB_components false
 -no_fconfig
