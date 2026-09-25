@@ -28,3 +28,10 @@
 -ignore_unrecognized_res
 -ignore_zero_occupancy false
 -no_fconfig
+
+# Restored for parity with the legacy glycandock_defaults.init that
+# generated the existing glycographer ensembles. Leaving it unset makes
+# residue typing depend on the Rosetta build's default, which is one
+# more uncontrolled difference between old and new runs.
+-load_PDB_components false
+
