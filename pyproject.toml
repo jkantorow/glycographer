@@ -10,13 +10,41 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "glycographer contributors" }]
-dependencies = []
 
-[project.scripts]
-glycographer = "glycographer.cli:main"
+# Only the pip-installable core is declared here. Three heavyweight
+# dependencies are deliberately omitted because pip cannot supply the builds
+# this project needs:
+#
+#   pymol      -> conda-forge `pymol-open-source` (the PyPI `pymol` is a
+#                 different, unrelated package)
+#   open3d     -> conda-forge `open3d` / `open3d-cpu`
+#   pyrosetta  -> Graylab-licensed wheel, not distributed on PyPI
+#
+# environment.yaml remains the source of truth for a complete environment.
+# Version floors are set below what the glycographer env already has, so
+# `pip install -e .` inside that env resolves as a no-op and only writes the
+# editable path link.
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "scikit-learn>=1.3",
+    "scikit-image>=0.20",
+    "MDAnalysis>=2.5",
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[project.optional-dependencies]
+# Parquet engine for GlycanDockEnsemble.energies_to_parquet().
+parquet = ["pyarrow>=14.0"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["glycographer*"]
+
+# NOTE: config/*.init currently lives at the repo root, outside the package, so
+# it is reachable via __file__ under an editable install but would NOT ship in
+# a built wheel. Moving config/ to glycographer/config/ and declaring it as
+# package-data is the eventual fix; deferred because scripts/slurm/*.sh
+# reference the repo-root path.
