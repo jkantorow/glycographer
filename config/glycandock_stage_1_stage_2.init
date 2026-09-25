@@ -4,6 +4,21 @@
 -write_pdb_link_records
 -maintain_links
 
+# -auto_detect_glycan_connections is required whenever this session has to read
+# a RAW (non-prepacked) PDB, which is exactly what prepack_mode='per_decoy'
+# does -- it runs Stage 0 inside this same session. -maintain_links alone only
+# preserves LINK records already present in the file; it never infers
+# connectivity from geometry. Without this flag a raw complex loads with every
+# sugar isolated (one glycan tree per residue, each patched
+# reducing_end:non-reducing_end and missing its anomeric oxygen), which makes
+# pack_missing_sidechains build tens of thousands of free-sugar rotamers and
+# effectively hang in DensePDInteractionGraph.
+#
+# Harmless when the input IS prepacked: the LINK records are already there and
+# detection just re-finds the same bonds. The legacy glycandock_defaults.init
+# carried both flags together for this reason.
+-auto_detect_glycan_connections
+
 -docking:partners A_X
 
 -ex1

@@ -4,6 +4,12 @@
 -write_pdb_link_records
 -maintain_links
 
+# Required whenever this session reads a RAW (non-prepacked) PDB -- see the
+# longer note in glycandock_stage_1_stage_2.init. -maintain_links alone only
+# preserves LINK records already in the file and never infers connectivity,
+# which leaves every sugar isolated and hangs the packer.
+-auto_detect_glycan_connections
+
 -docking:partners A_X
 
 -ex1

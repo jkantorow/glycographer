@@ -480,6 +480,70 @@ def _seed_flags(seed: Optional[int]) -> str:
     return f'-run:constant_seed -run:jran {int(seed)}'
 
 
+def read_option_flags(options_file: str) -> set:
+    '''Flag names (the leading -token of each line) declared in a Rosetta options file.'''
+    flags = set()
+    with open(options_file) as f:
+        for line in f:
+            line = line.split('#', 1)[0].strip()
+            if line.startswith('-'):
+                flags.add(line.split()[0])
+    return flags
+
+
+def check_options(options_file: str, config: GlycanDockConfig) -> List[str]:
+    '''
+    Preflight the options file against the config, returning human-readable
+    problem descriptions (empty when nothing looks wrong).
+
+    Each check corresponds to a way of silently wasting a cluster job rather
+    than failing fast, so this runs both in --dry-run and at the top of
+    run_block().
+    '''
+    problems = []
+    try:
+        flags = read_option_flags(options_file)
+    except OSError as e:
+        return [f'could not read options file {options_file}: {e}']
+
+    # Reading a raw PDB needs geometric connection detection; -maintain_links
+    # only preserves LINK records that already exist in the file.
+    if (config.prepack_mode == 'per_decoy'
+            and '-auto_detect_glycan_connections' not in flags):
+        problems.append(
+            f"prepack_mode='per_decoy' runs Stage 0 in this session, so the "
+            f"input is a RAW pdb, but {os.path.basename(options_file)} has no "
+            f"-auto_detect_glycan_connections. Every sugar will load "
+            f"unlinked (one glycan tree per residue), and rebuilding their "
+            f"anomeric oxygens will blow up the packer. Add the flag, or use "
+            f"prepack_mode='once' with a prepacked input.")
+
+    # A prepack-only options file turns the whole sampling run into a no-op.
+    if '-carbohydrates:glycan_dock:prepack_only' in flags:
+        problems.append(
+            f'{os.path.basename(options_file)} sets prepack_only, which would '
+            f'make every decoy a pre-pack rather than a docking run. This is '
+            f'the Stage 0 options file -- use it with prepack(), not '
+            f'run_block().')
+
+    # refine_only set in the options file but not the config (or vice versa)
+    # silently changes whether Stage 1 runs at all.
+    opt_refine = '-carbohydrates:glycan_dock:refine_only' in flags
+    if opt_refine != config.refine_only:
+        problems.append(
+            f'refine_only disagrees: config says {config.refine_only}, '
+            f'{os.path.basename(options_file)} says {opt_refine}. Stage 1 '
+            f'would run differently than the config records, making the '
+            f'manifest misleading.')
+
+    if '-include_sugars' not in flags:
+        problems.append(
+            f'{os.path.basename(options_file)} has no -include_sugars; '
+            f'glycan residues will not be typed as carbohydrates.')
+
+    return problems
+
+
 def init_rosetta(options_file: str, complex_pdb: Optional[str] = None, *,
                  native: Optional[str] = None,
                  n_cycles: Optional[int] = None,
@@ -796,6 +860,9 @@ def run_block(config: GlycanDockConfig, complex_pdb: str, *,
     run_id = run_id or outprefix
     if options_file is None:
         options_file = STAGE_2_OPTIONS if config.refine_only else STAGE_1_2_OPTIONS
+
+    for problem in check_options(options_file, config):
+        print(f'OPTIONS PREFLIGHT: {problem}\n')
 
     if seed is None:
         seed = block_seed(run_id, block_index)

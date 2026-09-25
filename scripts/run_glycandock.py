@@ -37,8 +37,8 @@ import sys
 
 from glycographer.sample import (
     GlycanDockConfig, STAGE_1_2_OPTIONS, STAGE_2_OPTIONS,
-    block_seed, block_slice, check_setters, decoy_name, default_outprefix,
-    run_block,
+    block_seed, block_slice, check_options, check_setters, decoy_name,
+    default_outprefix, run_block,
 )
 
 
@@ -265,6 +265,14 @@ def main():
                 print(f'  {field:18s} {pub!r:>8} -> {mine!r}')
         else:
             print('  (identical to publication defaults)')
+
+        problems = check_options(options, config)
+        if problems:
+            print('\noptions preflight:')
+            for p in problems:
+                print(f'  ! {p}\n')
+            return 1
+        print('\noptions preflight: OK')
         return 0
 
     _require_pyrosetta()
