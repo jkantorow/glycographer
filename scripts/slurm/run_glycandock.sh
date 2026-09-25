@@ -31,11 +31,6 @@ else
     esac
 fi
 
-# Default options file (inside the repo) if not supplied
-if [ -z "$options" ]; then
-    options="$GLYCOGRAPHER_PATH/config/glycandock_defaults.init"
-fi
-
 ## Prefer an explicitly set CONDA_PATH, otherwise try to discover Conda
 if [ -z "$CONDA_PATH" ]; then
     if command -v conda >/dev/null 2>&1; then
