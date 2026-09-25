@@ -66,7 +66,7 @@ def init_glycandock(complex, nstruct=1, n_cycles=1, native=None, options=None):
     -n_cycles {n_cycles}
     '''
     if native is not None:
-        ''.join([in_flags, f'-in:file:native {native}'])
+        in_flags = in_flags + f'-in:file:native {native}'
 
     # Lazy import init so that utils.py can be imported without having pyrosetta installed
     from pyrosetta import init
