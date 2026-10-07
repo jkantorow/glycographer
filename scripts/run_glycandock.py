@@ -32,6 +32,7 @@ config) without initializing Rosetta -- it works on machines without PyRosetta.
 '''
 
 import argparse
+import json
 import os
 import sys
 
@@ -171,6 +172,10 @@ def build_parser():
     par.add_argument('--overwrite', action='store_true',
                      help="Replace this block's existing decoys, manifest and timings. Without "
                           'it the run refuses to start if any of them already exist.')
+    par.add_argument('--resume', action='store_true',
+                     help='Skip blocks that already finished (manifest present) and rerun '
+                          'unfinished ones, replacing their partial outputs. Resubmit the '
+                          'original command with this added to fill in failed blocks.')
 
     misc = parser.add_argument_group('diagnostics')
     misc.add_argument('--dry-run', action='store_true',
@@ -232,17 +237,23 @@ def main():
     block_index = args.block_index if args.block_index is not None else \
         _env_int('SLURM_ARRAY_TASK_ID', 0)
 
-    # An explicit --n-blocks that disagrees with the array size means some
-    # blocks are never run (array too small) or tasks error out (too large).
+    # An explicit --n-blocks that disagrees with the array means some blocks
+    # are never run (array too small) or tasks error out (ids too large). A
+    # sparse array like --array=7,23 is a deliberate rerun of chosen blocks, so
+    # only a full 0..N-1 array is checked for being too small.
     array_count = _env_int('SLURM_ARRAY_TASK_COUNT', None)
-    if args.n_blocks is not None and array_count is not None \
-            and args.n_blocks != array_count:
-        print(f'Warning: --n-blocks {args.n_blocks} does not match the SLURM array '
-              f'size ({array_count} tasks); '
-              + (f'blocks {array_count}..{args.n_blocks - 1} will never run.'
-                 if args.n_blocks > array_count else
-                 f'tasks {args.n_blocks}..{array_count - 1} will fail as out of range.'),
-              file=sys.stderr)
+    array_max = _env_int('SLURM_ARRAY_TASK_MAX', None)
+    if args.n_blocks is not None and array_count is not None:
+        if array_max is None:
+            array_max = array_count - 1
+        if array_max >= args.n_blocks:
+            print(f'Warning: SLURM array ids run up to {array_max} but --n-blocks is '
+                  f'{args.n_blocks}; tasks {args.n_blocks}..{array_max} will fail as '
+                  f'out of range.', file=sys.stderr)
+        elif array_count == array_max + 1 and array_count < args.n_blocks:
+            print(f'Warning: --n-blocks {args.n_blocks} does not match the SLURM array '
+                  f'size ({array_count} tasks); blocks {array_count}..'
+                  f'{args.n_blocks - 1} will never run.', file=sys.stderr)
 
     try:
         config = resolve_config(args)
@@ -268,12 +279,36 @@ def main():
               f'({args.nstruct} total). Nothing to do.')
         return 0
 
+    # The manifest is written last, so a readable one covering exactly this
+    # block's indices means the block finished. With --resume such blocks are
+    # skipped and anything else (e.g. a walltime kill) is rerun from scratch.
+    manifest_path = _block_outputs(args.outdir, outprefix, run_id,
+                                   block_index, indices)[-2]
+    complete = False
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path) as f:
+                done = json.load(f)
+        except (OSError, ValueError):
+            done = None
+        if done is not None and done.get('indices') != indices:
+            print(f'Error: {os.path.basename(manifest_path)} covers decoys '
+                  f'{done.get("indices")[:3]}... but block {block_index} of {n_blocks} '
+                  f'is now {indices[:3]}... -- -n or --n-blocks differs from the '
+                  f'original run.', file=sys.stderr)
+            return 1
+        complete = done is not None
+    if args.resume and complete:
+        print(f'Block {block_index} of {n_blocks} already complete '
+              f'({os.path.basename(manifest_path)}). Skipping.')
+        return 0
+
     # Seeds depend only on (run_id, block_index), so a resubmission into the
     # same outdir would silently regenerate and clobber identical decoys.
     existing = [p for p in _block_outputs(args.outdir, outprefix, run_id,
                                           block_index, indices)
                 if os.path.exists(p)]
-    if existing and not args.overwrite and not args.dry_run:
+    if existing and not (args.overwrite or args.resume) and not args.dry_run:
         print(f'Error: block {block_index} of {n_blocks} would overwrite '
               f'{len(existing)} existing file(s) in {os.path.abspath(args.outdir)}:',
               file=sys.stderr)
@@ -281,7 +316,8 @@ def main():
             print(f'  {os.path.basename(p)}', file=sys.stderr)
         if len(existing) > 5:
             print(f'  ... and {len(existing) - 5} more', file=sys.stderr)
-        print('Use a different --outdir/--run-id, or pass --overwrite.', file=sys.stderr)
+        print('Use --resume to rerun only unfinished blocks, a different '
+              '--outdir/--run-id, or --overwrite.', file=sys.stderr)
         return 1
 
     if args.dry_run:
@@ -299,8 +335,8 @@ def main():
         print(f'last output  : {decoy_name(outprefix, indices[-1])}')
         if existing:
             print(f'existing     : {len(existing)} output file(s) already present -- '
-                  + ('will be overwritten' if args.overwrite
-                     else 'a real run will refuse without --overwrite'))
+                  + ('will be overwritten' if args.overwrite or args.resume
+                     else 'a real run will refuse without --resume/--overwrite'))
         print('\nresolved config vs publication defaults:')
         diff = GlycanDockConfig.publication().diff(config)
         if diff:
