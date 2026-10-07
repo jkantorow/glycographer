@@ -6,6 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
+#SBATCH --mem=2G
 #SBATCH --time=06:00:00
 #SBATCH --output=./gdock_%A_%a.out
 #SBATCH --error=./gdock_%A_%a.err
@@ -40,11 +41,22 @@
 # `run_glycandock.py ... --dry-run`.
 #
 # Partition notes for this cluster:
-#   simbiosyslab  lab-owned, PriorityTier=10, 30 day limit, 768 cores. Primary.
-#   short         default, 2 day limit, ~9000 cores. Good general overflow.
+#   simbiosyslab  lab-owned, PriorityTier=10, 30 day limit, 768 CPUs on 3
+#                 nodes. QoS `pi` has no per-user limits, so throttle yourself.
+#   short         default, 2 day limit, ~9000 CPUs. Good general overflow.
+#                 QoS `short` caps each user at 50 running jobs (array tasks
+#                 count individually) and cpu=1024.
 #   sharing       ~22000 cores but a hard 1 hour limit -- size blocks to
 #                 finish in ~45 minutes with margin.
 # Throttle concurrent tasks on shared partitions with e.g. --array=0-41%20.
+#
+# Resources per task (measured, 2hrl-sia28sia, one decoy per task):
+#   - Nodes are hyperthreaded and SelectTypeParameters=CR_CORE_MEMORY, so a
+#     1-CPU task is allocated a whole core = 2 CPUs (sacct AllocCPUS=2). Count
+#     2 CPUs per task against partition totals.
+#   - Peak RSS ~1.0 GB. --mem=2G gives ~2x headroom; it matches the cluster
+#     DefMemPerCPU=2000 but is pinned here so it survives policy changes. If
+#     MaxRSS climbs on large blocks, raise it.
 #
 # Logs are written per task via %A_%a (job id, array index). Without that,
 # every task in the array would clobber the same file.
