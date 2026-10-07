@@ -1,12 +1,12 @@
 #!/bin/bash
 
 #SBATCH --job-name=glycandock
-#SBATCH --partition=short
+#SBATCH --partition=simbiosyslab
 #SBATCH --array=0-0
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --time=04:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=./gdock_%A_%a.out
 #SBATCH --error=./gdock_%A_%a.err
 
