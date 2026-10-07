@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=glycandock
-#SBATCH --partition=simbiosyslab
+#SBATCH --partition=simbiosyslab,short
 #SBATCH --array=0-0
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
