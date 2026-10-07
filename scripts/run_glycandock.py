@@ -54,6 +54,14 @@ def _env_int(name, default):
         return default
 
 
+def _block_outputs(outdir, outprefix, run_id, block_index, indices):
+    '''Every file run_block would write for this block.'''
+    paths = [os.path.join(outdir, decoy_name(outprefix, i)) for i in indices]
+    paths.append(os.path.join(outdir, f'{run_id}_block{block_index:03d}_manifest.json'))
+    paths.append(os.path.join(outdir, f'{run_id}_block{block_index:03d}_timings.jsonl'))
+    return paths
+
+
 _NO_PYROSETTA = '''\
 PyRosetta is not available in this environment.
 
@@ -160,6 +168,9 @@ def build_parser():
     par.add_argument('--no-reuse-template', action='store_true',
                      help='Re-read the input PDB for every decoy instead of copying a template '
                           'pose. Slower; restores the exact legacy read-per-decoy behavior.')
+    par.add_argument('--overwrite', action='store_true',
+                     help="Replace this block's existing decoys, manifest and timings. Without "
+                          'it the run refuses to start if any of them already exist.')
 
     misc = parser.add_argument_group('diagnostics')
     misc.add_argument('--dry-run', action='store_true',
@@ -221,6 +232,18 @@ def main():
     block_index = args.block_index if args.block_index is not None else \
         _env_int('SLURM_ARRAY_TASK_ID', 0)
 
+    # An explicit --n-blocks that disagrees with the array size means some
+    # blocks are never run (array too small) or tasks error out (too large).
+    array_count = _env_int('SLURM_ARRAY_TASK_COUNT', None)
+    if args.n_blocks is not None and array_count is not None \
+            and args.n_blocks != array_count:
+        print(f'Warning: --n-blocks {args.n_blocks} does not match the SLURM array '
+              f'size ({array_count} tasks); '
+              + (f'blocks {array_count}..{args.n_blocks - 1} will never run.'
+                 if args.n_blocks > array_count else
+                 f'tasks {args.n_blocks}..{array_count - 1} will fail as out of range.'),
+              file=sys.stderr)
+
     try:
         config = resolve_config(args)
     except (ValueError, OSError) as e:
@@ -245,6 +268,22 @@ def main():
               f'({args.nstruct} total). Nothing to do.')
         return 0
 
+    # Seeds depend only on (run_id, block_index), so a resubmission into the
+    # same outdir would silently regenerate and clobber identical decoys.
+    existing = [p for p in _block_outputs(args.outdir, outprefix, run_id,
+                                          block_index, indices)
+                if os.path.exists(p)]
+    if existing and not args.overwrite and not args.dry_run:
+        print(f'Error: block {block_index} of {n_blocks} would overwrite '
+              f'{len(existing)} existing file(s) in {os.path.abspath(args.outdir)}:',
+              file=sys.stderr)
+        for p in existing[:5]:
+            print(f'  {os.path.basename(p)}', file=sys.stderr)
+        if len(existing) > 5:
+            print(f'  ... and {len(existing) - 5} more', file=sys.stderr)
+        print('Use a different --outdir/--run-id, or pass --overwrite.', file=sys.stderr)
+        return 1
+
     if args.dry_run:
         print(f'run_id       : {run_id}')
         print(f'complex      : {args.complex}')
@@ -258,6 +297,10 @@ def main():
         print(f'seed         : {seed}')
         print(f'first output : {decoy_name(outprefix, indices[0])}')
         print(f'last output  : {decoy_name(outprefix, indices[-1])}')
+        if existing:
+            print(f'existing     : {len(existing)} output file(s) already present -- '
+                  + ('will be overwritten' if args.overwrite
+                     else 'a real run will refuse without --overwrite'))
         print('\nresolved config vs publication defaults:')
         diff = GlycanDockConfig.publication().diff(config)
         if diff:
