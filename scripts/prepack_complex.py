@@ -14,15 +14,21 @@ refines with only -ex1 -ex2. Rosetta takes its options once per process, so the
 two stages cannot share a session. Fine sampling is affordable once per complex
 and ruinous once per decoy.
 
-Feed the output to run_glycandock.py with --prepack-mode once:
+Feed the output to run_glycandock.py. A standard (no --grid) run expects a
+prepacked input by default:
 
     prepack_complex.py complex.pdb -o complex_prepacked.pdb
+    run_glycandock.py complex_prepacked.pdb -n 1000 --native complex.pdb
+
+A probe run (--grid) still prepacks per decoy by default, so add
+--prepack-mode once there to use the prepacked structure instead:
+
     run_glycandock.py complex_prepacked.pdb -n 1000 --grid grid.pdb \
         --prepack-mode once
 
-NOTE: every glycographer ensemble generated so far used the legacy in-loop
-prepack ('per_decoy', still the default), under the coarser -ex1 -ex2 flags.
-Decoys produced this way are not guaranteed comparable with those -- validate
+NOTE: every glycographer probe ensemble generated so far used the legacy
+in-loop prepack ('per_decoy'), under the coarser -ex1 -ex2 flags. Probe decoys
+from a prepacked input are not guaranteed comparable with those -- validate
 before mixing them in a single analysis.
 '''
 

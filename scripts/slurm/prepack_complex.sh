@@ -30,11 +30,13 @@
 #       complex.pdb -o complex_prepacked.pdb)
 #   sbatch --dependency=afterok:$PREPACK --array=0-41 \
 #       scripts/slurm/run_glycandock.sh complex_prepacked.pdb \
-#       -n 1000 --grid grid.pdb --prepack-mode once
+#       -n 1000 --native complex.pdb
 #
-# NOTE: --prepack-mode once departs from how every existing glycographer
-# ensemble was generated (in-loop prepacking under coarser flags). Validate
-# before mixing the two in one analysis.
+# Without --grid, run_glycandock.py expects a prepacked input by default. A
+# probe run (--grid) prepacks per decoy unless given --prepack-mode once. That
+# departs from how every existing glycographer probe ensemble was generated
+# (in-loop prepacking under coarser flags), so validate before mixing the two
+# in one analysis.
 
 CONDA_PATH="${CONDA_PATH:-}"
 GLYCOGRAPHER_PATH="${GLYCOGRAPHER_PATH:-}"

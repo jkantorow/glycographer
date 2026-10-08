@@ -12,7 +12,9 @@ the module. Two sampling modes, selected by --preset (or inferred from --grid):
               putative binding site.
 - refinement  Standard GlycanDock refinement of a known or designed complex.
               Rosetta's GlycanDock has an effective docking range of ~7 A, so
-              the input pose is assumed to be near the true binding pose.
+              the input pose is assumed to be near the true binding pose. The
+              glycoligand is not randomized, and the input must already be
+              prepacked (prepack_complex.py), as in the published workflow.
 
 Parallelism
 -----------
@@ -96,8 +98,9 @@ def build_parser():
   sbatch --array=0-41 scripts/slurm/run_glycandock.sh complex.pdb \\
       -n 1000 --grid grid.pdb --n-blocks 42
 
-  # refine a known complex against a native reference
-  run_glycandock.py complex.pdb -n 50 --preset refinement --native xtal.pdb
+  # standard GlycanDock run on a known complex (no --grid -> refinement preset)
+  prepack_complex.py complex.pdb -o complex_prepacked.pdb
+  run_glycandock.py complex_prepacked.pdb -n 50 --native complex.pdb
 
   # sweep a protocol parameter without a dedicated flag
   run_glycandock.py complex.pdb -n 20 --set mc_kt=0.8 --set rb_rounds=12
@@ -139,13 +142,20 @@ def build_parser():
                        help='Stage 2 outer ramping cycles (preset default: 1 for probe, 10 for refinement).')
     proto.add_argument('--refine-only', action='store_true',
                        help='Skip Stage 1 and run only Stage 2 on the input structure.')
-    proto.add_argument('--no-random-start', action='store_true',
-                       help='Do not randomize glycoligand orientation before docking.')
+    start = proto.add_mutually_exclusive_group()
+    start.add_argument('--random-start', dest='random_start', action='store_true',
+                       default=None,
+                       help='Randomize glycoligand orientation (RigidBodyRandomizeMover) before '
+                            'docking. Default: on for probe, off for refinement/publication.')
+    start.add_argument('--no-random-start', dest='random_start', action='store_false',
+                       help='Start every decoy from the input glycoligand orientation.')
     proto.add_argument('--prepack-mode', choices=('per_decoy', 'once', 'none'),
                        default=None,
-                       help="Stage 0 handling. 'per_decoy' (default) prepacks inside the loop, "
-                            "matching every existing glycographer ensemble. 'once' expects the "
-                            "input PDB to be already prepacked by prepack_complex.py.")
+                       help="Stage 0 handling. 'once' (default for refinement/publication) expects "
+                            "the input PDB to be already prepacked by prepack_complex.py. "
+                            "'per_decoy' (default for probe) prepacks inside the loop, matching "
+                            "every existing glycographer probe ensemble. 'none' skips Stage 0 "
+                            "and records that no prepacking was intended.")
     proto.add_argument('--cst-file', type=str, default=None,
                        help='Rosetta constraint file (-cst_fa_file) for restrained refinement. '
                             'Not used for probe sampling.')
@@ -201,8 +211,8 @@ def resolve_config(args):
         changes['n_cycles'] = args.n_cycles
     if args.refine_only:
         changes['refine_only'] = True
-    if args.no_random_start:
-        changes['random_start'] = False
+    if args.random_start is not None:
+        changes['random_start'] = args.random_start
     if args.prepack_mode is not None:
         changes['prepack_mode'] = args.prepack_mode
     if changes:

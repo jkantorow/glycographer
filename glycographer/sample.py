@@ -25,15 +25,23 @@ Staging
 
     'per_decoy'  legacy glycographer behavior -- prepack inside the decoy loop,
                  in the same Rosetta session as Stages 1/2. This is what every
-                 existing glycographer ensemble was generated with, so it is
-                 the default; results stay comparable.
+                 existing glycographer ensemble was generated with, so the
+                 `probe()` preset uses it; probe results stay comparable.
     'once'       the input PDB is expected to be ALREADY prepacked by a
                  separate `prepack()` job, run as its own process.
                  Stage 0 is skipped here. This matches the published GlycanDock
                  workflow, where prepacking runs under different Rosetta flags
                  (-ex3 -ex4 -ex1aro -ex2aro) than refinement (-ex1 -ex2) and
-                 therefore cannot share a process.
-    'none'       no pre-packing at all.
+                 therefore cannot share a process. It is the field default, so
+                 `refinement()` and `publication()` use it.
+    'none'       no pre-packing at all, deliberately -- e.g. a prepacking
+                 ablation, or an input whose side chains should stay as given.
+
+'once' and 'none' run identically in the decoy loop: neither applies Stage 0.
+The difference is only in what the run records. 'once' asserts the input
+was prepacked, while 'none' says the run was meant to have no Stage 0. The
+manifest keeps that intent, so an ensemble can later be described correctly in
+a methods section.
 '''
 
 from dataclasses import dataclass, asdict, replace, fields
@@ -126,8 +134,8 @@ class GlycanDockConfig:
     ramp_sf: bool = True # Set whether to ramp the fa_atr and fa_rep score terms of the ScoreFunction used during Stage 2 sampling and optimization
 
     # Glycographer staging parameters (not GlycanDock mover settings):
-    prepack_mode: str = 'per_decoy' # How Stage 0 is handled: 'per_decoy' (legacy), 'once' (input is pre-prepacked), or 'none'. See module docstring.
-    random_start: bool = True # Randomize glycoligand orientation with RigidBodyRandomizeMover before docking
+    prepack_mode: str = 'once' # How Stage 0 is handled: 'once' (input is pre-prepacked, publication workflow), 'per_decoy' (legacy, probe preset), or 'none'. See module docstring.
+    random_start: bool = False # Randomize glycoligand orientation with RigidBodyRandomizeMover before docking. Off by default: a standard run starts from the glycoligand's known pose. The probe preset turns it on.
 
     _PREPACK_MODES = ('per_decoy', 'once', 'none')
 
@@ -148,14 +156,23 @@ class GlycanDockConfig:
     # comparable with everything already in the archive. Where they differ from
     # the publication defaults:
     #
-    #   field              publication   probe    refinement
-    #   n_cycles                    10       1            10
-    #   stage1_rand_rot          False    True          True
-    #   stage1_rot_mag             7.5   180.0           7.5
-    #   stage2_trans_mag           0.5     0.2           0.5
-    #   stage2_rot_mag             7.5    45.0           7.5
-    #   rb_rounds                    8      20             8
-    #   tor_rounds                   8      20             8
+    #   field              publication   probe       refinement
+    #   n_cycles                    10       1               10
+    #   stage1_rand_rot          False    True            False
+    #   stage1_rot_mag             7.5   180.0              7.5
+    #   stage2_trans_mag           0.5     0.2              0.5
+    #   stage2_rot_mag             7.5    45.0              7.5
+    #   rb_rounds                    8      20                8
+    #   tor_rounds                   8      20                8
+    #   prepack_mode              once   per_decoy        once
+    #   random_start             False    True            False
+    #
+    # `refinement` therefore currently equals `publication`. It stays a
+    # separate preset so that refinement-specific choices can diverge later
+    # without changing what "publication" means. Note `stage1_rand_rot`: the
+    # old script set it True for refinement too, which rotates the glycoligand
+    # 360 degrees about its center of mass in Stage 1 and throws away the
+    # known starting orientation. It is False here, as published.
     #
     # Note `tor_rounds`: the old script set n_torsion_rounds = 20
     # unconditionally, so it applied to refinement as well as probe sampling,
@@ -174,7 +191,9 @@ class GlycanDockConfig:
         Probes are small (one or a few residues) compared with a full glycan
         chain, so Stage 1 places them with a full 360 degree randomization,
         Stage 2 runs a single ramping cycle, and sampling is weighted toward
-        rigid-body moves with tighter translational steps.
+        rigid-body moves with tighter translational steps. Each decoy's start
+        orientation is randomized, and Stage 0 runs per decoy, as in every
+        existing glycographer probe ensemble.
         '''
         base = dict(
             n_cycles=1,
@@ -184,6 +203,8 @@ class GlycanDockConfig:
             stage2_rot_mag=45.0,
             rb_rounds=20,
             tor_rounds=20,
+            prepack_mode='per_decoy',
+            random_start=True,
         )
         base.update(overrides)
         return cls(**base)
@@ -194,17 +215,22 @@ class GlycanDockConfig:
         Preset for refining a known or designed protein-glycan complex, i.e. a
         standard GlycanDock run rather than grid probing.
 
+        The glycoligand starts from its input pose (no random start), and
+        the input must already be prepacked by prepack() (prepack_mode='once').
+
         Pass `refine_only=True` to bypass Stage 1 entirely; the stage1_* fields
         are then unused.
         '''
         base = dict(
             n_cycles=10,
-            stage1_rand_rot=True,
+            stage1_rand_rot=False,
             stage1_rot_mag=7.5,
             stage2_trans_mag=0.5,
             stage2_rot_mag=7.5,
             rb_rounds=8,
             tor_rounds=8,
+            prepack_mode='once',
+            random_start=False,
         )
         base.update(overrides)
         return cls(**base)
@@ -858,7 +884,8 @@ def run_block(config: GlycanDockConfig, complex_pdb: str, *,
 
     if config.prepack_mode == 'once' and verbose:
         print(f"prepack_mode='once': assuming {complex_pdb} is already "
-              f"prepacked (Stage 0 will NOT run in this process).")
+              f"prepacked (Stage 0 will NOT run in this process). If it is "
+              f"a raw structure, run prepack_complex.py on it first.")
 
     outprefix = outprefix or default_outprefix(complex_pdb)
     run_id = run_id or outprefix
