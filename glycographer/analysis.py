@@ -241,18 +241,18 @@ def cluster_ensemble_poses(ensemble, rmsd_cutoff=2.0, min_cluster_size=6,
 
 
 def summarize_clusters(scoredata, score_name='interaction_energy',
-                       native_rmsd_name='heavy_Lrmsd'):
+                       rmsd_names=('heavy_Lrmsd', 'ref_rmsd', 'ref_rmsd_fit')):
     '''
     One row per pose cluster, built from the cluster_id / cluster_center
     columns written by cluster_ensemble_poses (so it also works on a reloaded
     scores CSV).
 
     Columns: cluster_id, size, fraction (of all poses), center_model,
-    best_model, then center_/best_/mean_/median_/std_<score_name>. When
-    scoredata has a native RMSD column with values in it (GlycanDock fills
-    heavy_Lrmsd when the run used --native), adds center_/min_/median_
-    <native_rmsd_name>, which shows whether each cluster sits at the known
-    binding pose.
+    best_model, then center_/best_/mean_/median_/std_<score_name>. For each
+    column in rmsd_names that scoredata has values for, adds center_/min_/
+    median_<name>, which shows whether each cluster sits at the known binding
+    pose. GlycanDock fills heavy_Lrmsd when the run used --native;
+    rmsd_to_reference fills ref_rmsd / ref_rmsd_fit for any reference PDB.
     '''
     if 'cluster_id' not in scoredata.columns:
         raise ValueError('scoredata has no cluster_id column; run '
@@ -264,11 +264,12 @@ def summarize_clusters(scoredata, score_name='interaction_energy',
         score = pd.to_numeric(sd[score_name], errors='coerce')
     else:
         score = pd.Series(np.nan, index=sd.index)
-    native = None
-    if native_rmsd_name in sd.columns:
-        native = pd.to_numeric(sd[native_rmsd_name], errors='coerce')
-        if not native.notna().any():
-            native = None
+    rmsds = {}
+    for name in rmsd_names:
+        if name in sd.columns:
+            vals = pd.to_numeric(sd[name], errors='coerce')
+            if vals.notna().any():
+                rmsds[name] = vals
 
     rows = []
     for cid, grp in sd.groupby('cluster_id', sort=True):
@@ -291,14 +292,187 @@ def summarize_clusters(scoredata, score_name='interaction_energy',
             f'median_{score_name}': s.median(),
             f'std_{score_name}': s.std(),
         }
-        if native is not None:
-            r = native.loc[grp.index]
-            row[f'center_{native_rmsd_name}'] = r.get(center, np.nan)
-            row[f'min_{native_rmsd_name}'] = r.min()
-            row[f'median_{native_rmsd_name}'] = r.median()
+        for name, vals in rmsds.items():
+            r = vals.loc[grp.index]
+            row[f'center_{name}'] = r.get(center, np.nan)
+            row[f'min_{name}'] = r.min()
+            row[f'median_{name}'] = r.median()
         rows.append(row)
 
     return pd.DataFrame(rows)
+
+
+def _kabsch_rmsd(mobile, ref):
+    '''
+    Minimum RMSD of each mobile frame onto a single reference after optimal
+    rotation and translation (Kabsch), vectorized over frames.
+
+    mobile : (n_frames, n_atoms, 3); ref : (n_atoms, 3). Returns (n_frames,).
+    '''
+    P = mobile - mobile.mean(axis=1, keepdims=True)
+    Q = ref - ref.mean(axis=0)
+    H = np.einsum('fai,aj->fij', P, Q)               # (n_frames, 3, 3)
+    U, S, Vt = np.linalg.svd(H)
+    # Flip the smallest singular value where the best fit would be a reflection.
+    d = np.sign(np.linalg.det(np.einsum('fij,fjk->fik', U, Vt)))
+    S[:, 2] *= d
+    e0 = (P ** 2).sum(axis=(1, 2)) + (Q ** 2).sum()
+    msd = np.maximum(e0 - 2.0 * S.sum(axis=1), 0.0) / ref.shape[0]
+    return np.sqrt(msd)
+
+
+def rmsd_to_reference(ensemble, reference_pdb, column=None, superimpose=False,
+                      reference_selection=None, match='resid',
+                      allow_missing=False, heavy_only=True):
+    '''
+    RMSD of every docked ligand pose to a ligand pose from any reference PDB
+    (e.g. a crystal structure of a probe or glycan bound to the receptor),
+    written into ensemble.scoredata.
+
+    This complements the native-relative scores GlycanDock writes itself
+    (heavy_/ring_ Lrmsd and Srmsd), for references that were not passed as
+    --native: probe runs, alternate literature sites, other crystal forms.
+
+    Atoms are paired by identity, not by file order, so the reference may
+    contain extra atoms (receptor, waters, hydrogens) or list atoms in a
+    different order. Coordinates must already be in the docked receptor
+    frame for the in-place RMSD to mean anything.
+
+    Parameters
+    ----------
+    ensemble : GlycanDockEnsemble
+    reference_pdb : str
+        Structure containing the reference ligand pose.
+    column : str, optional
+        scoredata column to write. Defaults to 'ref_rmsd', or
+        'ref_rmsd_fit' when superimpose=True.
+    superimpose : bool
+        False (default): in-place RMSD, no fitting -- like GlycanDock's
+        Lrmsd, it measures whether the pose is in the right place. True:
+        RMSD after optimally superimposing each pose onto the reference --
+        like Srmsd, it measures only whether the conformation is right.
+    reference_selection : str, optional
+        MDAnalysis selection for the ligand in reference_pdb. Defaults to the
+        ensemble's ligand chain (chainID X) if the reference has one,
+        otherwise every atom in the file.
+    match : {'resid', 'order'}
+        How residues are paired. 'resid': by residue number + atom name
+        (numbering must agree). 'order': by order of appearance + atom name,
+        for references whose residues are numbered differently but listed in
+        the same order.
+    allow_missing : bool
+        If False (default), raise when any atom fails to pair, listing them.
+        If True, compute over the atoms that do pair and warn about the rest
+        (e.g. a reducing-end O1 present in only one structure).
+    heavy_only : bool
+        Use heavy atoms only (default True).
+
+    Returns
+    -------
+    pd.Series of RMSDs indexed like scoredata. attrs['n_atoms'] is the number
+    of paired atoms.
+    '''
+    import warnings
+    import MDAnalysis as mda
+
+    sd = ensemble.scoredata
+    if sd is None:
+        raise ValueError('Ensemble has no scoredata; build it with '
+                         'GlycanDockEnsemble.from_poses or from_files first.')
+    if column is None:
+        column = 'ref_rmsd_fit' if superimpose else 'ref_rmsd'
+
+    # Reference ligand atoms.
+    u = mda.Universe(reference_pdb)
+    if reference_selection is None:
+        lig_chain = ensemble._lig_chain_id
+        try:
+            ref = u.select_atoms(f'chainID {lig_chain}')
+        except Exception:
+            ref = u.atoms[:0]
+        if len(ref) == 0:
+            ref = u.atoms
+    else:
+        ref = u.select_atoms(reference_selection)
+    if len(ref) == 0:
+        raise ValueError(f'No reference atoms selected from {reference_pdb}.')
+    try:
+        ref_elements = np.asarray(ref.elements)
+    except (AttributeError, mda.exceptions.NoDataError):
+        ref_elements = None
+    if heavy_only:
+        ref = ref[~ensemble._hydrogen_mask(ref.names, ref_elements)]
+
+    # Docked ligand atoms, aligned with ligand_coordinates().
+    lig = ensemble.ligand_atoms(heavy_only=heavy_only)
+
+    def keys(resids, names):
+        resids = np.asarray(resids)
+        if match == 'resid':
+            res_key = resids
+        elif match == 'order':
+            _, first = np.unique(resids, return_index=True)
+            rank = {r: i for i, r in enumerate(resids[np.sort(first)])}
+            res_key = np.array([rank[r] for r in resids])
+        else:
+            raise ValueError(f"Unknown match {match!r}; choose 'resid' or "
+                             "'order'.")
+        return [(int(r), str(n).strip()) for r, n in zip(res_key, names)]
+
+    lig_keys = keys(lig['resid'], lig['name'])
+    ref_keys = keys(ref.resids, ref.names)
+
+    ref_index = {}
+    dup = set()
+    for i, k in enumerate(ref_keys):
+        if k in ref_index:
+            dup.add(k)      # e.g. alternate locations; keep the first
+        else:
+            ref_index[k] = i
+    if dup:
+        warnings.warn(f'{len(dup)} duplicate reference atom(s) (alternate '
+                      f'locations?) -- using the first of each: '
+                      f'{sorted(dup)[:10]}')
+
+    lig_idx = [i for i, k in enumerate(lig_keys) if k in ref_index]
+    ref_idx = [ref_index[lig_keys[i]] for i in lig_idx]
+    lig_only = sorted(set(lig_keys) - set(ref_index))
+    ref_only = sorted(set(ref_index) - set(lig_keys))
+
+    key_desc = '(resid, name)' if match == 'resid' else '(residue order, name)'
+    if not lig_idx:
+        raise ValueError(
+            f'No ligand atoms paired with {reference_pdb} by {key_desc}. '
+            f"Check reference_selection, or try match='order' if the "
+            f'residue numbering differs.')
+    if lig_only or ref_only:
+        msg = (f'{len(lig_only)} docked-ligand atom(s) and {len(ref_only)} '
+               f'reference atom(s) did not pair by {key_desc}. '
+               f'Docked only: {lig_only[:10]}; reference only: '
+               f'{ref_only[:10]}.')
+        if not allow_missing:
+            raise ValueError(msg + ' Pass allow_missing=True to use the '
+                             f'{len(lig_idx)} paired atoms, or try '
+                             f"match='order' if residues are renumbered.")
+        warnings.warn(msg + f' Using the {len(lig_idx)} paired atoms.')
+
+    X = ensemble.ligand_coordinates(heavy_only=heavy_only)[:, lig_idx]
+    if X.shape[0] != len(sd):
+        raise ValueError(f'{X.shape[0]} coordinate frames but {len(sd)} '
+                         f'scoredata rows; they must correspond one to one.')
+    X = X.astype(np.float64)
+    R = ref.positions[ref_idx].astype(np.float64)
+
+    if superimpose:
+        vals = _kabsch_rmsd(X, R)
+    else:
+        vals = np.sqrt(((X - R) ** 2).sum(axis=2).mean(axis=1))
+
+    sd[column] = vals
+    out = sd[column].copy()
+    out.attrs.update(n_atoms=len(lig_idx), reference=reference_pdb,
+                     superimpose=superimpose)
+    return out
 
 
 # ----------------- VolMap Analysis ----------------- #

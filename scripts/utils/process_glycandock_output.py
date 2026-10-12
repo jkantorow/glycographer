@@ -24,9 +24,11 @@ Outputs (prefix defaults to the posedir / ensemble basename):
   <prefix>_<N>p_ensemble.pdb        multimodel ligand ensemble (mode 1 only)
   <prefix>_scoredata.csv            per-pose scores + cluster_id,
                                     cluster_center, cluster_rmsd_to_center
+                                    (+ ref_rmsd with --reference)
   <prefix>_clusters.csv             one row per cluster (size, center/best
-                                    pose, score stats, native RMSD stats if
-                                    the run used --native)
+                                    pose, score stats, and RMSD stats vs the
+                                    native if the run used --native and/or
+                                    vs --reference)
   <prefix>_residue_energies.parquet per-residue REF15 terms (mode 1 only)
 
 The ensemble PDB and scoredata CSV are the inputs for PyMOL cluster
@@ -47,7 +49,7 @@ if _REPO_ROOT not in sys.path:
 
 from glycographer.utils import build_pose_list
 from glycographer.dock import GlycanDockEnsemble
-from glycographer.analysis import cluster_ensemble_poses
+from glycographer.analysis import cluster_ensemble_poses, rmsd_to_reference
 
 
 def _load_ensemble(args, parser):
@@ -127,12 +129,26 @@ def main():
                              'leader: leader-follower, best-scoring poses become leaders first.')
     parser.add_argument('--cluster-cutoff', type=float, default=2.0,
                         help='RMSD cutoff for assigning poses to a cluster in Angstroms (default: 2.0)')
-    parser.add_argument('--min-cluster-size', type=int, default=4,
-                        help='Minimum number of clustered poses to be considered significant (default: 4)')
+    parser.add_argument('--min-cluster-size', type=int, default=6,
+                        help='Minimum number of clustered poses to be considered significant (default: 6)')
     parser.add_argument('--cluster-score', type=str, default='interaction_energy',
                         help='Score used to break ties, order leaders, and summarize clusters; lower is better (default: interaction_energy)')
     parser.add_argument('--include-hydrogens', action='store_true',
-                        help='Include hydrogens in the clustering RMSD (default: heavy atoms only)')
+                        help='Include hydrogens in the clustering and reference RMSDs (default: heavy atoms only)')
+
+    # Reference pose
+    parser.add_argument('--reference', type=str, default=None,
+                        help='PDB with a known ligand pose (e.g. a crystal probe pose) in the receptor frame. '
+                             'Adds in-place ref_rmsd to scoredata and the cluster summary. Use when the run '
+                             'had no --native; otherwise GlycanDock already reports heavy_Lrmsd.')
+    parser.add_argument('--reference-selection', type=str, default=None,
+                        help='MDAnalysis selection for the ligand within --reference (default: chain X if present, else all atoms)')
+    parser.add_argument('--reference-match', choices=['resid', 'order'], default='resid',
+                        help='Pair reference atoms by residue number + atom name (resid, default) or by residue order + atom name (order)')
+    parser.add_argument('--reference-allow-missing', action='store_true',
+                        help='Compute over the atoms that pair instead of failing when some do not')
+    parser.add_argument('--reference-superimpose', action='store_true',
+                        help='Also write ref_rmsd_fit, the RMSD after superimposing each pose on the reference (conformation only)')
 
     args = parser.parse_args()
 
@@ -153,6 +169,20 @@ def main():
     if from_poses and not args.no_parse_energies:
         path = ens.energies_to_parquet(out('residue_energies.parquet'))
         print(f'[{outprefix}] wrote residue energies -> {path}')
+
+    if args.reference:
+        for superimpose in ([False, True] if args.reference_superimpose else [False]):
+            rmsd = rmsd_to_reference(
+                ens, args.reference,
+                superimpose=superimpose,
+                reference_selection=args.reference_selection,
+                match=args.reference_match,
+                allow_missing=args.reference_allow_missing,
+                heavy_only=not args.include_hydrogens,
+            )
+            print(f'[{outprefix}] {rmsd.name} to {args.reference} over '
+                  f'{rmsd.attrs["n_atoms"]} atoms: min {rmsd.min():.2f}, '
+                  f'median {rmsd.median():.2f} A')
 
     if not args.no_cluster:
         summary = cluster_ensemble_poses(

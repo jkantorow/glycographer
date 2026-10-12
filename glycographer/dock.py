@@ -10,13 +10,9 @@ import os
 from sklearn.preprocessing import MinMaxScaler
 from scipy.spatial import cKDTree
 import MDAnalysis as mda
-from MDAnalysis.analysis import rms
 from MDAnalysis.coordinates.memory import MemoryReader
 import numpy as np
 import pandas as pd
-
-import pymol
-from pymol import cmd
 
 #from pyrosetta import init, pose_from_pdb, Vector1
 #from pyrosetta.rosetta.protocols.rigid import RigidBodyRandomizeMover, partner_downstream
@@ -880,56 +876,49 @@ class GlycanDockEnsemble:
         heavy_only : bool, optional
             Drop hydrogens (default True).
         '''
+        mask = self._ligand_atom_mask(heavy_only)
         if self._lig_coords is not None:
-            coords = self._lig_coords
-            if heavy_only:
-                coords = coords[:, ~self._hydrogen_mask(self._lig_names,
-                                                        self._lig_elements)]
-            return coords
-
+            return self._lig_coords[:, mask]
         u = self.universe
-        try:
-            elements = u.atoms.elements
-        except (AttributeError, mda.exceptions.NoDataError):
-            elements = None
-        mask = (~self._hydrogen_mask(u.atoms.names, elements) if heavy_only
-                else np.ones(len(u.atoms), dtype=bool))
         return np.asarray([u.atoms.positions[mask] for _ in u.trajectory],
                           dtype=np.float32)
 
-    def rmsd_from_reference(self, reference_pdb: str, use_mda=False):
+    def ligand_atoms(self, heavy_only=True):
         '''
-        Calculate the in-place RMSD of each pose to a known reference
-        pose.
+        Per-atom identity of the ligand, one row per atom in the same order
+        as the atom axis of ligand_coordinates(heavy_only).
+
+        Returns
+        -------
+        pd.DataFrame with columns resid, resname, name, element.
         '''
-        if use_mda:
-            u = mda.Universe(self._ensemble_file)
-            ref = mda.Universe(reference_pdb)
+        resids, resnames, names, elements = self._ligand_identity()
+        mask = self._ligand_atom_mask(heavy_only)
+        return pd.DataFrame({
+            'resid': resids[mask], 'resname': resnames[mask],
+            'name': names[mask],
+            'element': elements[mask] if elements is not None else '',
+        })
 
-            R = rms.RMSD(u, ref, select='not name *H*')
-            R.run()
+    def _ligand_identity(self):
+        '''(resids, resnames, names, elements) for every ligand atom.'''
+        if self._lig_coords is not None:
+            return (self._lig_resids_atom, self._lig_resnames_atom,
+                    self._lig_names, self._lig_elements)
+        atoms = self.universe.atoms
+        try:
+            elements = np.asarray(atoms.elements)
+        except (AttributeError, mda.exceptions.NoDataError):
+            elements = None
+        return (np.asarray(atoms.resids), np.asarray(atoms.resnames),
+                np.asarray(atoms.names), elements)
 
-            self._rmsd_results = R.results.rmsd
-            self.scoredata['ref_rmsd'] = self._rmsd_results[2]
-
-        else:
-            cmd.load(self._ensemble_file, 'ensemble')
-            cmd.load(reference_pdb, 'reference')
-
-            cmd.select('ensemble_heavy', 'ensemble and not elem H')
-            cmd.select('reference_heavy', 'reference and not elem H')
-
-            rmsd_vals = []
-            for i in range(cmd.count_states('ensemble')):
-                rmsd = cmd.rms_cur('ensemble_heavy', 'reference_heavy',
-                                   mobile_state=i+1,
-                                   target_state=0)
-                rmsd_vals.append(rmsd)
-
-            self._rmsd_results = rmsd_vals
-            self.scoredata['ref_rmsd'] = self._rmsd_results
-
-        return self
+    def _ligand_atom_mask(self, heavy_only):
+        '''Atom mask shared by ligand_coordinates and ligand_atoms.'''
+        _, _, names, elements = self._ligand_identity()
+        if heavy_only:
+            return ~self._hydrogen_mask(names, elements)
+        return np.ones(len(names), dtype=bool)
 
     def scale_inteng(self, method='minmax'):
         '''
@@ -1017,8 +1006,8 @@ class GlycanDockEnsemble:
         '''
         Return a path to the multimodel ensemble PDB, writing it on demand.
 
-        Downstream tools that need a file on disk (the PyMOL-based
-        rmsd_from_reference, PyMOL cluster visualization) call this. If a file was already
+        Downstream tools that need a file on disk (e.g. PyMOL cluster
+        visualization) call this. If a file was already
         written or loaded it is reused; otherwise to_pdb() materializes one
         from the in-memory coordinates. Mapping does NOT need this -- use the
         in-memory `.universe` instead.
