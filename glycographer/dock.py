@@ -3,7 +3,7 @@ Dataclass for managing a GlycanDocking run between a receptor and glycoligand
 '''
 
 from dataclasses import dataclass, field
-from typing import Tuple, Dict, List
+from typing import Tuple, List
 import json
 import os
 
@@ -52,7 +52,6 @@ class GlycanDockEnsemble:
     _pose_dir: os.PathLike = field(default=None, init=False)
     _ensemble_path: os.PathLike = field(default=None, init=False)
     _ensemble_file: str = field(default=None, init=False)
-    _clusters: Dict = field(default=None, init=False)
 
     # In-memory structural data captured during read_poses. The coordinate
     # arrays are the source of truth for the ensemble structure; the multimodel
@@ -721,7 +720,8 @@ class GlycanDockEnsemble:
         hydrogen bonds -- which is exactly the Newhouse-style decomposition.
 
         Re-scoring is the expensive step, so pass a filtered/clustered subset
-        of `models` (e.g. from filter_by_score or a dominant cluster).
+        of `models` (e.g. from filter_by_score or a dominant cluster from
+        analysis.cluster_ensemble_poses).
 
         Parameters
         ----------
@@ -848,59 +848,54 @@ class GlycanDockEnsemble:
         self.interface_energies.to_parquet(outname, index=False)
         return outname
 
-    def cluster_poses(self, rmsd_cutoff=2.0, min_cluster_size=4):
+    @staticmethod
+    def _hydrogen_mask(names, elements=None):
         '''
-        Perform a leader-follower clustering algorithm via
-        pairwise rmsd and add the cluster id as a column in
-        the scoredata dataframe. Only clusters with at least
-        min_cluster_size members are considered relevant.
+        Boolean mask of hydrogen atoms. Uses the PDB element column when every
+        atom has one, otherwise falls back to Rosetta atom naming (hydrogen
+        names start with H after any leading digits, e.g. 'H1', 'HO4', '1H6').
         '''
-        if not self._ensemble_file:
-            raise ValueError('Cannot cluster poses until ensemble file is created.')
-        ens_name = os.path.basename(self._ensemble_file.replace('.pdb', ''))
-        rmsd_sel = f'{ens_name} and not elem H'
-        self.scoredata['cluster_id'] = None
+        if elements is not None:
+            elements = np.char.upper(np.char.strip(np.asarray(elements, dtype=str)))
+            if np.all(elements != ''):
+                return elements == 'H'
+        names = np.char.lstrip(np.asarray(names, dtype=str), '0123456789')
+        return np.char.startswith(np.char.upper(names), 'H')
 
-        cmd.load(self._ensemble_file, ens_name)
-        
-        clusters = {}
-        leaders = []
+    def ligand_coordinates(self, heavy_only=True):
+        '''
+        Ligand coordinates of every pose as an (n_models, n_atoms, 3) array.
 
-        # Leader-follower clustering
-        for model_id in self.scoredata.index:
-            assigned = False
-            for j, leader_id in enumerate(leaders):
-                cluster_id = f'cluster_{j+1}'
-                rmsd = cmd.rms_cur(rmsd_sel, rmsd_sel,
-                                   mobile_state=model_id,
-                                   target_state=leader_id)
-                if rmsd <= rmsd_cutoff:
-                    clusters.setdefault(cluster_id, []).append(model_id)
-                    assigned = True
-                    break
-            if not assigned:
-                leaders.append(model_id)
-                cluster_id = f'cluster_{len(leaders)}'
-                clusters[cluster_id] = [model_id]
+        Frame f (0-based) corresponds to the f-th row of scoredata (model_num
+        f + 1 for an ensemble built by from_poses). Atom order is identical in
+        every frame, so the array can be compared pose-to-pose directly -- this
+        is what in-memory analyses such as pairwise RMSD clustering consume.
 
-        # Filter clusters by min_cluster_size and update scoredata
-        relevant_clusters = {}
-        cluster_num = 1
-        for cluster_id, members in clusters.items():
-            if len(members) >= min_cluster_size:
-                new_cluster_id = f'cluster_{cluster_num}'
-                relevant_clusters[new_cluster_id] = members
-                for model_id in members:
-                    self.scoredata.loc[model_id, 'cluster_id'] = cluster_num
-                cluster_num += 1
-            else:
-                # For poses in small clusters, leave cluster_id as None
-                for model_id in members:
-                    self.scoredata.loc[model_id, 'cluster_id'] = None
+        Served from the in-memory arrays captured by read_poses when present;
+        otherwise read once from the ensemble PDB behind `.universe` (the
+        from_files() path).
 
-        self._clusters = relevant_clusters
+        Parameters
+        ----------
+        heavy_only : bool, optional
+            Drop hydrogens (default True).
+        '''
+        if self._lig_coords is not None:
+            coords = self._lig_coords
+            if heavy_only:
+                coords = coords[:, ~self._hydrogen_mask(self._lig_names,
+                                                        self._lig_elements)]
+            return coords
 
-        return self
+        u = self.universe
+        try:
+            elements = u.atoms.elements
+        except (AttributeError, mda.exceptions.NoDataError):
+            elements = None
+        mask = (~self._hydrogen_mask(u.atoms.names, elements) if heavy_only
+                else np.ones(len(u.atoms), dtype=bool))
+        return np.asarray([u.atoms.positions[mask] for _ in u.trajectory],
+                          dtype=np.float32)
 
     def rmsd_from_reference(self, reference_pdb: str, use_mda=False):
         '''
@@ -1023,7 +1018,7 @@ class GlycanDockEnsemble:
         Return a path to the multimodel ensemble PDB, writing it on demand.
 
         Downstream tools that need a file on disk (the PyMOL-based
-        cluster_poses / rmsd_from_reference) call this. If a file was already
+        rmsd_from_reference, PyMOL cluster visualization) call this. If a file was already
         written or loaded it is reused; otherwise to_pdb() materializes one
         from the in-memory coordinates. Mapping does NOT need this -- use the
         in-memory `.universe` instead.

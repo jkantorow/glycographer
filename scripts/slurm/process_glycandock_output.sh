@@ -1,79 +1,57 @@
 #!/bin/bash
 
 #SBATCH --job-name=gdock-process
-#SBATCH --partition=short
+#SBATCH --partition=simbiosyslab,short
 #SBATCH --nodes=1
-#SBATCH --tasks-per-node=1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
+#SBATCH --mem=8G
 #SBATCH --time=02:00:00
-#SBATCH --output=./gdock_process.out
-#SBATCH --error=./gdock_process.err
+#SBATCH --output=./gdock_process_%j.out
+#SBATCH --error=./gdock_process_%j.err
 
-# ====================== #
-# Process a GlycanDock
-# output pose directory:
-# load poses into a
-# GlycanDockEnsemble and
-# extract/cluster/dump the
-# relevant analysis data.
-# ====================== #
+# ============================================================ #
+# Process a GlycanDock output pose directory: load the poses
+# into a GlycanDockEnsemble, cluster the docked ligand poses,
+# and dump scores, the cluster summary, the ensemble PDB, and
+# per-residue energies.
+#
+# This wrapper is a thin pass-through: every argument is
+# forwarded verbatim to process_glycandock_output.py, so the
+# full Python CLI is available without maintaining a parallel
+# copy of each flag here. See `process_glycandock_output.py --help`.
+#
+# Examples:
+#   # Parse + cluster a full-glycoligand run:
+#   sbatch process_glycandock_output.sh runs/1k9i_full \
+#       --outdir processed --cluster-cutoff 2.0 --min-cluster-size 6
+#
+#   # Re-cluster processed output at another cutoff (no pose parsing):
+#   sbatch process_glycandock_output.sh \
+#       --ensemble-pdb processed/1k9i_full_5000p_ensemble.pdb \
+#       --scores-csv processed/1k9i_full_scoredata.csv \
+#       --outdir processed/c1p5 --cluster-cutoff 1.5
+#
+# Resources: clustering holds an n x n float32 RMSD matrix plus an
+# n x n boolean neighbor matrix (~125 MB at 5000 poses, ~2 GB at
+# 20000). --mem=8G covers that plus pose parsing with headroom;
+# raise it for much larger ensembles. The RMSD matrix product is
+# multithreaded by numpy's BLAS, which uses --cpus-per-task.
+#
+# Under sbatch, BASH_SOURCE points at Slurm's spooled copy of this
+# script, so export GLYCOGRAPHER_PATH=<repo root> before submitting
+# if the default below does not resolve to the repo.
+# ============================================================ #
 
 CONDA_PATH="${CONDA_PATH:-}"
 GLYCOGRAPHER_PATH="${GLYCOGRAPHER_PATH:-}"
 
-posedir=""
-outprefix=""
-outdir=""
-rangestart=""
-rangestop=""
-clustercutoff=""
-minclustersize=""
-nocluster=false
-nowritescoredata=false
-noparseenergies=false
-
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        -in|--posedir)
-            if [[ $1 == *=* ]]; then posedir="${1#*=}"; shift; else posedir="$2"; shift 2; fi
-            ;;
-        -o|--outprefix)
-            if [[ $1 == *=* ]]; then outprefix="${1#*=}"; shift; else outprefix="$2"; shift 2; fi
-            ;;
-        --outdir)
-            if [[ $1 == *=* ]]; then outdir="${1#*=}"; shift; else outdir="$2"; shift 2; fi
-            ;;
-        -range|--poserange)
-            # Takes two values: START STOP
-            rangestart="$2"; rangestop="$3"; shift 3
-            ;;
-        --cluster-cutoff)
-            if [[ $1 == *=* ]]; then clustercutoff="${1#*=}"; shift; else clustercutoff="$2"; shift 2; fi
-            ;;
-        --min-cluster-size)
-            if [[ $1 == *=* ]]; then minclustersize="${1#*=}"; shift; else minclustersize="$2"; shift 2; fi
-            ;;
-        --no-cluster)
-            nocluster=true; shift
-            ;;
-        --no-write-scoredata)
-            nowritescoredata=true; shift
-            ;;
-        --no-parse-energies)
-            noparseenergies=true; shift
-            ;;
-        *)
-            echo "Unknown parameter passed: $1"; exit 1
-            ;;
-    esac
-done
-
 module purge
 
-## Resolve `GLYCOGRAPHER_PATH` and `CONDA_PATH`, expand ~, and set defaults
+## Resolve `GLYCOGRAPHER_PATH`, expand ~, and set defaults
 if [ -z "$GLYCOGRAPHER_PATH" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    GLYCOGRAPHER_PATH="$(cd "$SCRIPT_DIR/.." && pwd)"
+    GLYCOGRAPHER_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
 else
     case "$GLYCOGRAPHER_PATH" in
         ~*) GLYCOGRAPHER_PATH="${HOME}${GLYCOGRAPHER_PATH#\~}" ;;
@@ -95,23 +73,15 @@ fi
 # Exit on any error
 set -e
 
-# Build python argument array to avoid empty flags/arguments being passed
-python_args=()
-if [[ -n "$posedir" ]]; then
-    python_args+=("$posedir")
-else
-    echo "No pose directory provided (-in / --posedir)."; exit 1
+if [[ "$#" -eq 0 ]]; then
+    echo "No arguments provided. See: process_glycandock_output.py --help"
+    exit 1
 fi
 
-if [[ -n "$outprefix" ]]; then python_args+=("--outprefix" "$outprefix"); fi
-if [[ -n "$outdir" ]]; then python_args+=("--outdir" "$outdir"); fi
-if [[ -n "$rangestart" && -n "$rangestop" ]]; then python_args+=("--poserange" "$rangestart" "$rangestop"); fi
-if [[ -n "$clustercutoff" ]]; then python_args+=("--cluster-cutoff" "$clustercutoff"); fi
-if [[ -n "$minclustersize" ]]; then python_args+=("--min-cluster-size" "$minclustersize"); fi
-if [[ $nocluster = true ]]; then python_args+=("--no-cluster"); fi
-if [[ $nowritescoredata = true ]]; then python_args+=("--no-write-scoredata"); fi
-if [[ $noparseenergies = true ]]; then python_args+=("--no-parse-energies"); fi
+# Let numpy's BLAS use the allocated cores for the RMSD matrix product.
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 
-$CONDA_PATH/envs/glycographer/bin/python $GLYCOGRAPHER_PATH/scripts/utils/process_glycandock_output.py "${python_args[@]}"
+$CONDA_PATH/envs/glycographer/bin/python \
+    $GLYCOGRAPHER_PATH/scripts/utils/process_glycandock_output.py "$@"
 
 exit 0

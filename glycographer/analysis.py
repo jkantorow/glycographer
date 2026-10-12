@@ -13,7 +13,295 @@ from scipy import ndimage
 # that importing this module (for map_stats, standardize_favorability,
 # find_hotspots, ...) stays lightweight -- map.py and dock.py depend on it.
 
+# ------------- GlycanDockEnsemble Analysis ------------- #
+def pairwise_rmsd(coords, block_size=1024):
+    '''
+    All-vs-all in-place RMSD between poses that share one atom ordering.
 
+    "In-place" means no superposition: docking decoys are already expressed in
+    the fixed receptor frame, so where the ligand sits is the signal. Two poses
+    with the same conformation in different pockets must come out far apart,
+    which a fitted RMSD (MDAnalysis/RDKit defaults) would hide. This is the
+    same quantity PyMOL's rms_cur reports, computed for every pair at once.
+
+    Uses the Gram-matrix identity |a - b|^2 = |a|^2 + |b|^2 - 2 a.b on the
+    flattened (n, 3 * n_atoms) coordinates in float64, after subtracting the
+    per-coordinate mean (a common shift leaves every pairwise distance
+    unchanged but avoids cancellation error for nearby poses). Rows are
+    computed in blocks so peak temporary memory is block_size x n doubles.
+
+    Parameters
+    ----------
+    coords : array-like, (n_poses, n_atoms, 3)
+        E.g. GlycanDockEnsemble.ligand_coordinates().
+    block_size : int
+        Rows per block.
+
+    Returns
+    -------
+    np.ndarray, (n_poses, n_poses) float32, in Angstroms. The result is n^2
+    floats: ~100 MB for 5000 poses, ~1.6 GB for 20000.
+    '''
+    X = np.asarray(coords, dtype=np.float64)
+    n, n_atoms = X.shape[0], X.shape[1]
+    X = X.reshape(n, -1)
+    X = X - X.mean(axis=0)
+    sq = np.einsum('ij,ij->i', X, X)
+
+    D = np.empty((n, n), dtype=np.float32)
+    for start in range(0, n, block_size):
+        stop = min(start + block_size, n)
+        d2 = sq[start:stop, None] + sq[None, :] - 2.0 * (X[start:stop] @ X.T)
+        np.maximum(d2, 0.0, out=d2)
+        D[start:stop] = np.sqrt(d2 / n_atoms)
+    np.fill_diagonal(D, 0.0)
+    return D
+
+
+def _gromos_clusters(adj, min_cluster_size, tiebreak):
+    '''
+    Neighbor-count (GROMOS / Daura et al.) clustering on a boolean
+    within-cutoff matrix. Repeatedly takes the unassigned pose with the most
+    unassigned neighbors as a center, assigns it and those neighbors to a new
+    cluster, and removes them. Stops once the largest remaining neighborhood
+    is below min_cluster_size, so undersized clusters are never formed.
+    Ties go to the pose with the lowest `tiebreak` (better score).
+
+    Returns (labels, centers): 0-based cluster label per pose (-1 =
+    unclustered) and the center pose index of each cluster. Clusters come out
+    largest first.
+    '''
+    n = adj.shape[0]
+    labels = np.full(n, -1, dtype=np.int64)
+    remaining = np.ones(n, dtype=bool)
+    counts = adj.sum(axis=1, dtype=np.int64)    # neighbors incl. self
+    centers = []
+    while remaining.any():
+        avail = np.where(remaining, counts, -1)
+        top = avail.max()
+        if top < min_cluster_size:
+            break
+        cand = np.flatnonzero(avail == top)
+        center = cand[np.argmin(tiebreak[cand])]
+        members = np.flatnonzero(remaining & adj[center])
+        labels[members] = len(centers)
+        centers.append(center)
+        remaining[members] = False
+        # Keep counts as "remaining neighbors" without recounting everything.
+        counts -= adj[members].sum(axis=0, dtype=np.int64)
+    return labels, np.asarray(centers, dtype=np.int64)
+
+
+def _leader_clusters(adj, min_cluster_size, order):
+    '''
+    Leader-follower clustering on a boolean within-cutoff matrix. Poses are
+    visited in `order`; each joins the first existing leader within the
+    cutoff, or becomes a new leader. Clusters smaller than min_cluster_size
+    are discarded afterwards (inherent to this algorithm) and the survivors
+    are renumbered largest first.
+
+    Returns (labels, centers) as in _gromos_clusters.
+    '''
+    n = adj.shape[0]
+    labels = np.full(n, -1, dtype=np.int64)
+    leaders = []
+    for i in order:
+        if leaders:
+            hits = adj[i, leaders]
+            if hits.any():
+                labels[i] = int(np.argmax(hits))
+                continue
+        labels[i] = len(leaders)
+        leaders.append(i)
+
+    sizes = np.bincount(labels, minlength=len(leaders))
+    keep = np.flatnonzero(sizes >= min_cluster_size)
+    keep = keep[np.argsort(-sizes[keep], kind='stable')]
+    remap = np.full(len(leaders), -1, dtype=np.int64)
+    remap[keep] = np.arange(len(keep))
+    return remap[labels], np.asarray(leaders, dtype=np.int64)[keep]
+
+
+def cluster_ensemble_poses(ensemble, rmsd_cutoff=2.0, min_cluster_size=6,
+                           method='gromos', score_name='interaction_energy',
+                           heavy_only=True, rmsd_matrix=None,
+                           leader_order='score'):
+    '''
+    Cluster the docked ligand poses of a GlycanDockEnsemble by pairwise
+    in-place RMSD and write the assignments into ensemble.scoredata.
+
+    Works on the in-memory coordinates (ensemble.ligand_coordinates()), so no
+    ensemble PDB has to be written first. Intended for full-glycoligand runs;
+    probe ensembles are mapped volumetrically instead.
+
+    Methods
+    -------
+    'gromos' (default)
+        Neighbor-count clustering (GROMOS / Daura et al.): the most populated
+        neighborhood becomes cluster 1, then repeat on what is left. It is
+        deterministic, independent of pose order, and stops once no
+        neighborhood reaches min_cluster_size, so small clusters are never
+        built. Cluster centers are the most-sampled pose of each basin, which
+        is the convergence signal to compare against score and native RMSD.
+    'leader'
+        Leader-follower, as previously implemented in
+        GlycanDockEnsemble.cluster_poses, but vectorized. Result depends on
+        visiting order (see leader_order); undersized clusters are dropped
+        afterwards.
+
+    Parameters
+    ----------
+    ensemble : GlycanDockEnsemble
+        Must have scoredata; row f of scoredata corresponds to coordinate
+        frame f.
+    rmsd_cutoff : float
+        Two poses are neighbors if their ligand RMSD is <= this (Angstroms).
+    min_cluster_size : int
+        Minimum number of poses (including the center) for a cluster.
+    method : {'gromos', 'leader'}
+    score_name : str
+        scoredata column used to break center ties (gromos), order leaders
+        (leader_order='score'), and summarize clusters. Lower is better.
+    heavy_only : bool
+        Compute RMSD over heavy atoms only (default True).
+    rmsd_matrix : np.ndarray, optional
+        Precomputed pairwise_rmsd() output, to reuse across cutoffs or for
+        other analyses (e.g. an RMSD-vs-score-difference plot).
+    leader_order : {'score', 'input'}
+        Visiting order for method='leader'. 'score' makes the best-scoring
+        poses leaders first; 'input' reproduces the old file-order behavior.
+
+    Returns
+    -------
+    pd.DataFrame
+        The cluster summary from summarize_clusters(). ensemble.scoredata
+        gains, in place:
+          cluster_id             nullable Int64, 1 = largest; <NA> if the pose
+                                 is in no cluster
+          cluster_center         bool, True for each cluster's center pose
+          cluster_rmsd_to_center RMSD to its cluster center (NaN if
+                                 unclustered)
+    '''
+    sd = ensemble.scoredata
+    if sd is None:
+        raise ValueError('Ensemble has no scoredata; build it with '
+                         'GlycanDockEnsemble.from_poses or from_files first.')
+
+    if rmsd_matrix is None:
+        rmsd_matrix = pairwise_rmsd(
+            ensemble.ligand_coordinates(heavy_only=heavy_only))
+    n = rmsd_matrix.shape[0]
+    if n != len(sd):
+        raise ValueError(f'{n} coordinate frames but {len(sd)} scoredata '
+                         f'rows; they must correspond one to one.')
+
+    if score_name in sd.columns:
+        score = pd.to_numeric(sd[score_name], errors='coerce').to_numpy(float)
+    else:
+        score = np.full(n, np.nan)
+    # Missing scores sort last when ranking poses.
+    rank_key = np.where(np.isnan(score), np.inf, score)
+
+    adj = rmsd_matrix <= rmsd_cutoff
+    adj &= adj.T  # guard against float asymmetry exactly at the cutoff
+
+    if method == 'gromos':
+        labels, centers = _gromos_clusters(adj, min_cluster_size, rank_key)
+    elif method == 'leader':
+        if leader_order == 'score':
+            order = np.argsort(rank_key, kind='stable')
+        elif leader_order == 'input':
+            order = np.arange(n)
+        else:
+            raise ValueError(f"Unknown leader_order {leader_order!r}; choose "
+                             "'score' or 'input'.")
+        labels, centers = _leader_clusters(adj, min_cluster_size, order)
+    else:
+        raise ValueError(f"Unknown method {method!r}; choose 'gromos' or "
+                         "'leader'.")
+
+    clustered = labels >= 0
+    is_center = np.zeros(n, dtype=bool)
+    is_center[centers] = True
+    to_center = np.full(n, np.nan)
+    idx = np.flatnonzero(clustered)
+    to_center[idx] = rmsd_matrix[idx, centers[labels[idx]]]
+
+    sd['cluster_id'] = pd.Series(labels + 1, index=sd.index,
+                                 dtype='Int64').where(clustered)
+    sd['cluster_center'] = is_center
+    sd['cluster_rmsd_to_center'] = to_center
+
+    summary = summarize_clusters(sd, score_name=score_name)
+    summary.attrs.update(method=method, rmsd_cutoff=rmsd_cutoff,
+                         min_cluster_size=min_cluster_size,
+                         heavy_only=heavy_only, n_poses=n,
+                         n_clustered=int(clustered.sum()))
+    return summary
+
+
+def summarize_clusters(scoredata, score_name='interaction_energy',
+                       native_rmsd_name='heavy_Lrmsd'):
+    '''
+    One row per pose cluster, built from the cluster_id / cluster_center
+    columns written by cluster_ensemble_poses (so it also works on a reloaded
+    scores CSV).
+
+    Columns: cluster_id, size, fraction (of all poses), center_model,
+    best_model, then center_/best_/mean_/median_/std_<score_name>. When
+    scoredata has a native RMSD column with values in it (GlycanDock fills
+    heavy_Lrmsd when the run used --native), adds center_/min_/median_
+    <native_rmsd_name>, which shows whether each cluster sits at the known
+    binding pose.
+    '''
+    if 'cluster_id' not in scoredata.columns:
+        raise ValueError('scoredata has no cluster_id column; run '
+                         'cluster_ensemble_poses first.')
+
+    n_total = len(scoredata)
+    sd = scoredata[scoredata['cluster_id'].notna()]
+    if score_name in sd.columns:
+        score = pd.to_numeric(sd[score_name], errors='coerce')
+    else:
+        score = pd.Series(np.nan, index=sd.index)
+    native = None
+    if native_rmsd_name in sd.columns:
+        native = pd.to_numeric(sd[native_rmsd_name], errors='coerce')
+        if not native.notna().any():
+            native = None
+
+    rows = []
+    for cid, grp in sd.groupby('cluster_id', sort=True):
+        s = score.loc[grp.index]
+        if 'cluster_center' in grp.columns:
+            centers = grp.index[grp['cluster_center'].astype(bool)]
+        else:
+            centers = grp.index[:0]
+        center = centers[0] if len(centers) else None
+        best = s.idxmin() if s.notna().any() else None
+        row = {
+            'cluster_id': int(cid),
+            'size': len(grp),
+            'fraction': len(grp) / n_total,
+            'center_model': center,
+            'best_model': best,
+            f'center_{score_name}': s.get(center, np.nan),
+            f'best_{score_name}': s.min(),
+            f'mean_{score_name}': s.mean(),
+            f'median_{score_name}': s.median(),
+            f'std_{score_name}': s.std(),
+        }
+        if native is not None:
+            r = native.loc[grp.index]
+            row[f'center_{native_rmsd_name}'] = r.get(center, np.nan)
+            row[f'min_{native_rmsd_name}'] = r.min()
+            row[f'median_{native_rmsd_name}'] = r.median()
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# ----------------- VolMap Analysis ----------------- #
 def map_stats(volmap, occupied_only=True):
     '''
     Distribution statistics of a volume map, computed directly from the voxel
@@ -554,7 +842,7 @@ def aggregate_interface(iface, scoredata=None, models=None, by_cluster=False):
     meaningful within a single binding mode -- across a near-global probe
     scan the glycan occupies different pockets in different poses. Pass
     by_cluster=True (with scoredata carrying a cluster_id column from
-    GlycanDockEnsemble.cluster_poses) to get one matrix per cluster.
+    cluster_ensemble_poses) to get one matrix per cluster.
 
     Parameters
     ----------
