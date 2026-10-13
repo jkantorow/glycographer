@@ -143,8 +143,10 @@ class GlycanDockEnsemble:
         This is the complement of from_poses: use it once you have written an
         ensemble PDB (to_pdb), a scores CSV (scores_to_csv), and/or the energy
         Parquets (energies_to_parquet / interface_energies_to_parquet), e.g.
-        via save_all(). The ensemble PDB is served lazily through `.universe`;
-        no coordinates are held in RAM until the universe is first accessed.
+        via save_all(). The ligand records of the ensemble PDB are read into
+        the same in-memory arrays read_poses fills, so `.universe`,
+        ligand_coordinates() and to_pdb() (including model subsets) all work
+        exactly as for a from_poses() ensemble.
 
         Parameters
         ----------
@@ -180,11 +182,47 @@ class GlycanDockEnsemble:
         if interface_energies_parquet is not None:
             ens.interface_energies = pd.read_parquet(interface_energies_parquet)
         if ensemble_pdb is not None:
-            ens._ensemble_file = os.path.abspath(ensemble_pdb)
-            if ens._n_poses is None:
-                ens._n_poses = len(ens.universe.trajectory)
+            ens._read_ensemble_pdb(ensemble_pdb)
 
         return ens
+
+    def _read_ensemble_pdb(self, ensemble_pdb):
+        '''
+        Fill the in-memory ligand topology and coordinate arrays from a
+        multimodel ensemble PDB (as written by to_pdb). Only ligand-chain
+        records are kept, so an ensemble written with include_receptor=True
+        also loads.
+        '''
+        coords, recs = [], None
+        with open(ensemble_pdb) as f:
+            for line in f:
+                if line.startswith('MODEL'):
+                    recs = []
+                elif line.startswith('ENDMDL'):
+                    self._store_model(recs, coords, ensemble_pdb)
+                    recs = None
+                elif (line.startswith(('ATOM', 'HETATM'))
+                      and line[21] == self._lig_chain_id):
+                    if recs is None:        # single-model file without MODEL
+                        recs = []
+                    recs.append(line)
+        if recs:                            # trailing model without ENDMDL
+            self._store_model(recs, coords, ensemble_pdb)
+        if not coords:
+            raise ValueError(f'No chain-{self._lig_chain_id} (ligand) atoms '
+                             f'found in {ensemble_pdb}.')
+
+        self._lig_coords = np.asarray(coords, dtype=np.float32)
+        self._n_poses = len(coords)
+        self._ensemble_file = os.path.abspath(ensemble_pdb)
+        self._universe = None
+
+    def _store_model(self, recs, coords, source_file):
+        '''Append one model's ligand coords, capturing topology from model 1.'''
+        if not coords:
+            self._capture_ligand_topology(recs)
+        self._check_atom_count(recs, self._lig_template, source_file, 'ligand')
+        coords.append(self._coords_from_records(recs))
 
     def save_all(self, out_dir='.', include_receptor=False):
         '''
@@ -560,11 +598,12 @@ class GlycanDockEnsemble:
                     'or from_files(ensemble_pdb=...).')
         return self._universe
 
-    def to_pdb(self, outname=None, include_receptor=False):
+    def to_pdb(self, outname=None, include_receptor=False, models=None,
+               bfactors=None, remarks=None):
         '''
         Write GlycanDock run pose files to a multimodel pdb
         ensemble.
-        
+
         Parameters:
         -----------
         outname : str, optional
@@ -573,7 +612,21 @@ class GlycanDockEnsemble:
         include_receptor : bool, optional
             Output receptor coordinates along with ligand
             coordinates to ensemble pdb
-            
+
+        models : sequence of model_num, optional
+            Write only these poses (scoredata index labels), in this order.
+            Each MODEL record carries the pose's model_num rather than a
+            renumbered serial, so poses stay traceable to scoredata. The
+            subset file is not cached as the ensemble file.
+
+        bfactors : sequence of float, optional
+            One value per written model, put in the B-factor column of all of
+            its atoms (e.g. interaction energy, so PyMOL can `spectrum b`).
+            Clipped to the column's range [-99.99, 999.99].
+
+        remarks : list of str, optional
+            Lines written as REMARK records before the first model.
+
         Returns:
         --------
         str : Path to created ensemble file
@@ -590,8 +643,14 @@ class GlycanDockEnsemble:
         if outname is None:
             outname = f'{self.run_id}_ensemble.pdb'
 
+        subset = models is not None or bfactors is not None or remarks
+
         # include_receptor without captured receptor coords -> legacy fallback.
         if include_receptor and self._rec_coords is None:
+            if subset:
+                raise ValueError(
+                    'models/bfactors/remarks with include_receptor=True need '
+                    'read_poses(store_receptor=True).')
             return self._to_pdb_from_files(outname, include_receptor=True)
 
         if self._lig_coords is None:
@@ -599,30 +658,56 @@ class GlycanDockEnsemble:
                 f'No structural data in {self}; run read_poses/from_poses '
                 f'(or use from_files with an ensemble PDB).')
 
-        ensemble_lines = []
-        for m in range(self._lig_coords.shape[0]):
-            ensemble_lines.append(f'MODEL     {m + 1:4d}\n')
+        n_all = self._lig_coords.shape[0]
+        if models is None:
+            frames = np.arange(n_all)
+            labels = frames + 1
+        else:
+            labels = np.asarray(list(models))
+            if self.scoredata is not None and len(self.scoredata) == n_all:
+                frames = self.scoredata.index.get_indexer(labels)
+            else:
+                frames = labels.astype(int) - 1
+            if np.any(frames < 0) or np.any(frames >= n_all):
+                raise ValueError(f'models not in this ensemble: '
+                                 f'{list(labels[(frames < 0) | (frames >= n_all)])}')
+        if bfactors is not None:
+            bfactors = np.clip(np.asarray(bfactors, dtype=float), -99.99, 999.99)
+            if len(bfactors) != len(frames):
+                raise ValueError(f'{len(bfactors)} bfactors for '
+                                 f'{len(frames)} models.')
+
+        ensemble_lines = [f'REMARK   1 {r}\n' for r in (remarks or [])]
+        for k, (m, label) in enumerate(zip(frames, labels)):
+            b = None if bfactors is None else bfactors[k]
+            ensemble_lines.append(f'MODEL     {int(label):4d}\n')
             if include_receptor:
                 self._emit_model_lines(ensemble_lines, self._rec_template,
-                                       self._rec_coords[m])
+                                       self._rec_coords[m], b)
             self._emit_model_lines(ensemble_lines, self._lig_template,
-                                   self._lig_coords[m])
+                                   self._lig_coords[m], b)
             ensemble_lines.append('ENDMDL\n')
 
         with open(outname, 'w') as f:
             f.writelines(ensemble_lines)
 
-        self._ensemble_file = os.path.abspath(outname)  # Cache the path
+        if not subset:
+            self._ensemble_file = os.path.abspath(outname)  # Cache the path
         return outname
 
     @staticmethod
-    def _emit_model_lines(out, template, coords):
+    def _emit_model_lines(out, template, coords, bfactor=None):
         '''
         Append one model's PDB lines to `out` by splicing `coords` (N, 3) into
-        the fixed coordinate columns (31-54) of each template line.
+        the fixed coordinate columns (31-54) of each template line, and
+        `bfactor` (if given) into the B-factor column (61-66).
         '''
         for line, (x, y, z) in zip(template, coords):
-            out.append(f'{line[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{line[54:]}')
+            if bfactor is None:
+                out.append(f'{line[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{line[54:]}')
+            else:
+                out.append(f'{line[:30]}{x:8.3f}{y:8.3f}{z:8.3f}'
+                           f'{line[54:60]}{bfactor:6.2f}{line[66:]}')
 
     def _to_pdb_from_files(self, outname, include_receptor=False):
         '''
@@ -867,21 +952,14 @@ class GlycanDockEnsemble:
         every frame, so the array can be compared pose-to-pose directly -- this
         is what in-memory analyses such as pairwise RMSD clustering consume.
 
-        Served from the in-memory arrays captured by read_poses when present;
-        otherwise read once from the ensemble PDB behind `.universe` (the
-        from_files() path).
+        Served from the in-memory arrays filled by read_poses or from_files.
 
         Parameters
         ----------
         heavy_only : bool, optional
             Drop hydrogens (default True).
         '''
-        mask = self._ligand_atom_mask(heavy_only)
-        if self._lig_coords is not None:
-            return self._lig_coords[:, mask]
-        u = self.universe
-        return np.asarray([u.atoms.positions[mask] for _ in u.trajectory],
-                          dtype=np.float32)
+        return self._lig_coords[:, self._ligand_atom_mask(heavy_only)]
 
     def ligand_atoms(self, heavy_only=True):
         '''
@@ -892,33 +970,22 @@ class GlycanDockEnsemble:
         -------
         pd.DataFrame with columns resid, resname, name, element.
         '''
-        resids, resnames, names, elements = self._ligand_identity()
         mask = self._ligand_atom_mask(heavy_only)
         return pd.DataFrame({
-            'resid': resids[mask], 'resname': resnames[mask],
-            'name': names[mask],
-            'element': elements[mask] if elements is not None else '',
+            'resid': self._lig_resids_atom[mask],
+            'resname': self._lig_resnames_atom[mask],
+            'name': self._lig_names[mask],
+            'element': self._lig_elements[mask],
         })
-
-    def _ligand_identity(self):
-        '''(resids, resnames, names, elements) for every ligand atom.'''
-        if self._lig_coords is not None:
-            return (self._lig_resids_atom, self._lig_resnames_atom,
-                    self._lig_names, self._lig_elements)
-        atoms = self.universe.atoms
-        try:
-            elements = np.asarray(atoms.elements)
-        except (AttributeError, mda.exceptions.NoDataError):
-            elements = None
-        return (np.asarray(atoms.resids), np.asarray(atoms.resnames),
-                np.asarray(atoms.names), elements)
 
     def _ligand_atom_mask(self, heavy_only):
         '''Atom mask shared by ligand_coordinates and ligand_atoms.'''
-        _, _, names, elements = self._ligand_identity()
+        if self._lig_coords is None:
+            raise ValueError('No in-memory ligand structure; build the '
+                             'ensemble with from_poses or from_files.')
         if heavy_only:
-            return ~self._hydrogen_mask(names, elements)
-        return np.ones(len(names), dtype=bool)
+            return ~self._hydrogen_mask(self._lig_names, self._lig_elements)
+        return np.ones(len(self._lig_names), dtype=bool)
 
     def scale_inteng(self, method='minmax'):
         '''

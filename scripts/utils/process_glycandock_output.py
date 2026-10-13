@@ -30,6 +30,9 @@ Outputs (prefix defaults to the posedir / ensemble basename):
                                     native if the run used --native and/or
                                     vs --reference)
   <prefix>_residue_energies.parquet per-residue REF15 terms (mode 1 only)
+  clusters/<prefix>_cluster_<id>.pdb representative ligand poses per cluster
+                                    (with --cluster-pdbs N; load in PyMOL
+                                    with vis.py's load_cluster_pdbs)
 
 The ensemble PDB and scoredata CSV are the inputs for PyMOL cluster
 visualization (scripts/vis/vis_clusters.py).
@@ -49,7 +52,8 @@ if _REPO_ROOT not in sys.path:
 
 from glycographer.utils import build_pose_list
 from glycographer.dock import GlycanDockEnsemble
-from glycographer.analysis import cluster_ensemble_poses, rmsd_to_reference
+from glycographer.analysis import (cluster_ensemble_poses, rmsd_to_reference,
+                                   write_cluster_pdbs)
 
 
 def _load_ensemble(args, parser):
@@ -133,6 +137,12 @@ def main():
                         help='Minimum number of clustered poses to be considered significant (default: 6)')
     parser.add_argument('--cluster-score', type=str, default='interaction_energy',
                         help='Score used to break ties, order leaders, and summarize clusters; lower is better (default: interaction_energy)')
+    parser.add_argument('--cluster-pdbs', type=int, default=None, metavar='N',
+                        help='Write each cluster\'s N representative ligand poses to <prefix>_cluster_<id>.pdb '
+                             'in <outdir>/clusters (0 = every member). Off by default.')
+    parser.add_argument('--cluster-pdbs-by', choices=['center', 'score'], default='center',
+                        help='Representatives nearest the cluster center (default) or best-scoring '
+                             '(center pose always included)')
     parser.add_argument('--include-hydrogens', action='store_true',
                         help='Include hydrogens in the clustering and reference RMSDs (default: heavy atoms only)')
 
@@ -201,6 +211,17 @@ def main():
               f'{a["n_clustered"]}/{a["n_poses"]} poses clustered -> {path}')
         if not summary.empty:
             print(summary.head(10).to_string(index=False))
+
+        if args.cluster_pdbs is not None:
+            cluster_dir = os.path.join(args.outdir, 'clusters')
+            paths = write_cluster_pdbs(
+                ens, outdir=cluster_dir,
+                n=args.cluster_pdbs or None,
+                by=args.cluster_pdbs_by,
+                score_name=args.cluster_score,
+                prefix=outprefix,
+            )
+            print(f'[{outprefix}] wrote {len(paths)} cluster PDBs -> {cluster_dir}')
 
     if not args.no_write_scoredata:
         path = ens.scores_to_csv(out('scoredata.csv'))

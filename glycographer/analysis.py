@@ -302,6 +302,128 @@ def summarize_clusters(scoredata, score_name='interaction_energy',
     return pd.DataFrame(rows)
 
 
+def cluster_representatives(scoredata, n=10, by='center', clusters=None,
+                            score_name='interaction_energy'):
+    '''
+    Pick the poses that represent each cluster, from the columns written by
+    cluster_ensemble_poses.
+
+    Parameters
+    ----------
+    scoredata : pd.DataFrame
+        Indexed by model_num, with cluster_id / cluster_center /
+        cluster_rmsd_to_center columns.
+    n : int or None
+        Poses per cluster; None keeps every member.
+    by : {'center', 'score'}
+        'center' (default): the poses nearest the cluster center, center
+        first. Shows what the basin looks like structurally.
+        'score': the best-scoring poses, so you see what the score function
+        favors inside the basin. The center pose is always kept as well (it
+        is appended if it is not already among the top n), so every file
+        holds the cluster's reference geometry.
+    clusters : list of int, optional
+        cluster_id values to include. Default: all.
+    score_name : str
+        Score used for by='score'; lower is better.
+
+    Returns
+    -------
+    pd.DataFrame
+        The selected scoredata rows, ordered by cluster_id then rank, with a
+        'cluster_rank' column (1 = first pose in that cluster's selection).
+    '''
+    if 'cluster_id' not in scoredata.columns:
+        raise ValueError('scoredata has no cluster_id column; run '
+                         'cluster_ensemble_poses first.')
+    if by not in ('center', 'score'):
+        raise ValueError(f"Unknown by {by!r}; choose 'center' or 'score'.")
+
+    sd = scoredata[scoredata['cluster_id'].notna()]
+    if clusters is not None:
+        sd = sd[sd['cluster_id'].isin(list(clusters))]
+
+    picked = []
+    for _, grp in sd.groupby('cluster_id', sort=True):
+        if by == 'center':
+            key = pd.to_numeric(grp['cluster_rmsd_to_center'], errors='coerce')
+        else:
+            key = pd.to_numeric(grp[score_name], errors='coerce')
+        top = grp.loc[key.sort_values(kind='stable', na_position='last').index]
+        if n is not None:
+            centers = top[top['cluster_center'].astype(bool)]
+            top = top.head(n)
+            missing = centers.index.difference(top.index)
+            if len(missing):
+                top = pd.concat([top, centers.loc[missing]])
+        top = top.assign(cluster_rank=np.arange(1, len(top) + 1))
+        picked.append(top)
+
+    if not picked:
+        return sd.iloc[:0].assign(cluster_rank=pd.Series(dtype=int))
+    return pd.concat(picked)
+
+
+def write_cluster_pdbs(ensemble, outdir='.', n=10, by='center', clusters=None,
+                       score_name='interaction_energy', prefix=None,
+                       rmsd_name='heavy_Lrmsd'):
+    '''
+    Write each cluster's representative ligand poses to its own multimodel
+    PDB: <outdir>/<prefix>_cluster_<id>.pdb.
+
+    Each MODEL record carries the pose's model_num (traceable to
+    scoredata), the B-factor column holds the pose's score (in PyMOL:
+    `spectrum b, blue_white_red` colors by score within and across files),
+    and a REMARK table at the top lists every model with its score, RMSD to
+    the cluster center, and native RMSD if present. Ligand only -- load the
+    receptor once alongside.
+
+    Parameters
+    ----------
+    ensemble : GlycanDockEnsemble
+        Clustered (scoredata has cluster_id) and holding structure, from
+        from_poses or from_files(ensemble_pdb=..., scores_csv=...).
+    outdir : str
+    n, by, clusters, score_name
+        Passed to cluster_representatives. n=None writes every member.
+    prefix : str, optional
+        Filename prefix. Defaults to ensemble.run_id.
+    rmsd_name : str
+        Native-RMSD column listed in the REMARK table when present.
+
+    Returns
+    -------
+    dict : {cluster_id: path}
+    '''
+    import os
+
+    reps = cluster_representatives(ensemble.scoredata, n=n, by=by,
+                                   clusters=clusters, score_name=score_name)
+    prefix = prefix or ensemble.run_id or 'ensemble'
+    os.makedirs(outdir, exist_ok=True)
+
+    cols = [score_name, 'cluster_rmsd_to_center']
+    if rmsd_name in reps.columns:
+        cols.append(rmsd_name)
+    width = max(len(str(int(reps['cluster_id'].max()))), 2) if len(reps) else 2
+
+    written = {}
+    for cid, grp in reps.groupby('cluster_id', sort=True):
+        vals = grp[cols].apply(pd.to_numeric, errors='coerce')
+        remarks = [f'cluster {int(cid)}: {len(grp)} poses selected by {by}; '
+                   f'B-factor = {score_name}',
+                   'model_num  center  ' + '  '.join(cols)]
+        for m, row in vals.iterrows():
+            flag = '*' if bool(grp.at[m, 'cluster_center']) else ' '
+            remarks.append(f'{m:>9}  {flag:>6}  ' + '  '.join(
+                f'{row[c]:>{len(c)}.3f}' for c in cols))
+        path = os.path.join(outdir, f'{prefix}_cluster_{int(cid):0{width}d}.pdb')
+        ensemble.to_pdb(path, models=grp.index, bfactors=vals[score_name],
+                        remarks=remarks)
+        written[int(cid)] = path
+    return written
+
+
 def _kabsch_rmsd(mobile, ref):
     '''
     Minimum RMSD of each mobile frame onto a single reference after optimal

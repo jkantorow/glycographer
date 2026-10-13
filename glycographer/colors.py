@@ -60,7 +60,7 @@ def get_snfg_color(resname: str, default: str = 'green') -> str:
 
 
 # ---------------------------------------------------------------------------
-# Categorical probe palette (colorblind-safe, for probe comparison)
+# Categorical palettes (colorblind-safe, for probe or cluster comparison)
 # ---------------------------------------------------------------------------
 # Okabe-Ito qualitative palette: eight colors chosen for distinguishability
 # under the common forms of color-vision deficiency. Grey is reserved for
@@ -76,6 +76,12 @@ OKABE_ITO: List[str] = [
     '#000000',  # black
 ]
 NO_PROBE_COLOR = '#BBBBBB'  # grey: voxels no probe visits
+
+
+# Can be pulled to easily match colors across plots and structural figures.
+_CLUSTER_COLORS = {'cluster_c1': [0x2a / 255, 0x78 / 255, 0xd6 / 255],
+                   'cluster_c2': [0xeb / 255, 0x68 / 255, 0x34 / 255],
+                   'cluster_c3': [0x1b / 255, 0xaf / 255, 0x7a / 255]}
 
 
 def probe_palette(labels: Sequence[str]) -> Dict[str, Tuple[float, float, float]]:
