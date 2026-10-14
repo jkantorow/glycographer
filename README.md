@@ -47,8 +47,9 @@ Currently working on CLI integration and more streamlined usage.
 python scripts/glycomodeler.py <glycan-iupac-string>
 python scripts/build_gridbox.py <receptor.pdb>
 
-# Concatenate receptor and ligand:
+# Concatenate receptor and ligand (or clean up a pre-assembled complex with -c):
 python scripts/utils/prepare_complexes.py -rec <receptor.pdb> -lig <ligand.pdb>
+python scripts/utils/prepare_complexes.py -c <complex.pdb> --lig-sel "chain X"
 
 # Run probe sampling and generate energy voxel maps:
 python scripts/run_glycandock.py <complex.pdb> -n <n-samples> -grid <grid>
