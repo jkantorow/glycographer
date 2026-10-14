@@ -15,6 +15,8 @@ Glycographer requires the following software:
 - PyRosetta 4+
 - Open3d
 
+**Note:** PyRosetta is freely available only for academic and other non-commercial use. Consult the [PyRosetta License](https://github.com/RosettaCommons/rosetta/blob/main/LICENSE.PyRosetta.md) for more information.
+
 Only tested on Linux architecture so far.
 
 ## Installation and Environment Setup
