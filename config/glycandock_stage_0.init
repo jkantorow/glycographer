@@ -16,7 +16,6 @@
 -carbohydrates:glycan_dock:prepack_only true
 -docking:partners A_X
 -ignore_zero_occupancy false
--ignore_unrecognized_res
 -no_fconfig
 
 # Restored for parity with the legacy glycandock_defaults.init that
