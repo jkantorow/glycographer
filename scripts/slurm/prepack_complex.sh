@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=gdock-prepack
-#SBATCH --partition=short
+#SBATCH --partition=simbiosyslab,short
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
