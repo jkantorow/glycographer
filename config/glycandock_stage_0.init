@@ -15,6 +15,7 @@
 -in:auto_setup_metals
 -carbohydrates:glycan_dock:prepack_only true
 -docking:partners A_X
+-ignore_zero_occupancy false
 -no_fconfig
 
 # Restored for parity with the legacy glycandock_defaults.init that
