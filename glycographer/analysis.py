@@ -302,6 +302,36 @@ def summarize_clusters(scoredata, score_name='interaction_energy',
     return pd.DataFrame(rows)
 
 
+def summarize_docking_funnel(scoredata, score_name='interaction_energy', rmsd_col='ring_Lrmsd', near_native=2.0, top_n=(1, 5, 10)):
+    '''
+    Take the scoredata of a docking run and output decoy, cluster,
+    and near-native metrics against a known crystal pose.
+    '''
+    summary = summarize_clusters(scoredata, score_name=score_name, rmsd_names=(rmsd_col,))
+    ranked = scoredata.sort_values(score_name)
+    near = scoredata[rmsd_col] < near_native
+
+    metrics = {
+    'near-native poses': f'{near.sum()} / {len(scoredata)} ({near.mean():.1%})',
+    'best-scoring pose': (f'model {ranked.index[0]}: {ranked[score_name].iloc[0]:.2f} REU, '
+                          f'{ranked[rmsd_col].iloc[0]:.2f} A'),
+    'lowest-RMSD pose': (f'model {scoredata[rmsd_col].idxmin()}: {scoredata[rmsd_col].min():.2f} A, '
+                         f'{scoredata.loc[scoredata[rmsd_col].idxmin(), score_name]:.2f} REU'),
+    }
+    for n in top_n:
+        metrics[f'N{n} near-native'] = f'{(ranked[rmsd_col].iloc[:n] < near_native).sum()} / {n}'
+
+    center_rmsd = f'center_{rmsd_col}'
+    median_score = f'median_{score_name}'
+    for label, row in [('most populated cluster', summary.iloc[0]),
+                    ('best median-score cluster', summary.loc[summary[median_score].idxmin()]),
+                    ('cluster nearest native', summary.loc[summary[center_rmsd].idxmin()])]:
+        metrics[label] = (f'C{int(row.cluster_id)}: {int(row["size"])} poses, center '
+                        f'{row[center_rmsd]:.2f} A, median {row[median_score]:.2f} REU')
+
+    return pd.Series(metrics, name='value').to_frame()
+
+
 def cluster_representatives(scoredata, n=10, by='center', clusters=None,
                             score_name='interaction_energy'):
     '''
