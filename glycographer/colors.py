@@ -78,10 +78,18 @@ OKABE_ITO: List[str] = [
 NO_PROBE_COLOR = '#BBBBBB'  # grey: voxels no probe visits
 
 
-# Can be pulled to easily match colors across plots and structural figures.
-_CLUSTER_COLORS = {'cluster_c1': [0x2a / 255, 0x78 / 255, 0xd6 / 255],
-                   'cluster_c2': [0xeb / 255, 0x68 / 255, 0x34 / 255],
-                   'cluster_c3': [0x1b / 255, 0xaf / 255, 0x7a / 255]}
+# Pose-cluster palette, shared by the docking funnel plots (matplotlib, hex)
+# and vis.load_cluster_pdbs (PyMOL, cluster_c1..c3 + cluster_other) so a
+# cluster has the same color on the plot and in the structure. Slot k colors
+# the k-th entry of a highlight list. Only three hues are validated for
+# all-pairs use on a scatter, so further clusters fold into the grey.
+CLUSTER_COLORS: List[str] = ['#2a78d6', '#eb6834', '#1baf7a']
+CLUSTER_OTHER_COLOR = '#898781'  # clustered, not highlighted
+UNCLUSTERED_COLOR = '#c3c2b7'    # in no cluster (plots only)
+
+_CLUSTER_COLORS = {f'cluster_c{i}': list(mcolors.to_rgb(h))
+                   for i, h in enumerate(CLUSTER_COLORS, start=1)}
+_CLUSTER_COLORS['cluster_other'] = list(mcolors.to_rgb(CLUSTER_OTHER_COLOR))
 
 
 def probe_palette(labels: Sequence[str]) -> Dict[str, Tuple[float, float, float]]:
