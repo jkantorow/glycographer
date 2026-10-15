@@ -307,6 +307,8 @@ def summarize_docking_funnel(scoredata, score_name='interaction_energy', rmsd_co
     Take the scoredata of a docking run and output decoy, cluster,
     and near-native metrics against a known crystal pose.
     '''
+    if 'model_num' in scoredata.columns:   # read without index_col
+        scoredata = scoredata.set_index('model_num')
     summary = summarize_clusters(scoredata, score_name=score_name, rmsd_names=(rmsd_col,))
     ranked = scoredata.sort_values(score_name)
     near = scoredata[rmsd_col] < near_native
@@ -330,6 +332,29 @@ def summarize_docking_funnel(scoredata, score_name='interaction_energy', rmsd_co
                         f'{row[center_rmsd]:.2f} A, median {row[median_score]:.2f} REU')
 
     return pd.Series(metrics, name='value').to_frame()
+
+
+def pick_highlight_clusters(summary, rmsd_col='ring_Lrmsd', highlight=None,
+                            n=3):
+    '''
+    Choose which clusters get the n palette colors (colors.CLUSTER_COLORS),
+    in slot order. Pass the same list to the funnel plot, write_cluster_pdbs
+    (clusters=) and vis.load_cluster_pdbs (highlight=) so each cluster keeps
+    one color across the plot and the structure.
+
+    highlight=None picks the two most populated clusters plus the cluster
+    whose center is nearest the native (center_<rmsd_col> in summary, from
+    summarize_clusters). An explicit list is truncated to n.
+    '''
+    if highlight is not None:
+        return [int(c) for c in list(highlight)[:n]]
+    picks = [int(c) for c in summary.nsmallest(n - 1, 'cluster_id').cluster_id]
+    center_rmsd = f'center_{rmsd_col}'
+    if center_rmsd in summary.columns and summary[center_rmsd].notna().any():
+        nearest = int(summary.loc[summary[center_rmsd].idxmin(), 'cluster_id'])
+        if nearest not in picks:
+            picks.append(nearest)
+    return picks[:n]
 
 
 def cluster_representatives(scoredata, n=10, by='center', clusters=None,
