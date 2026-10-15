@@ -13,8 +13,6 @@ import pandas as pd
 from pymol import cmd
 from pymol import stored
 
-from glycographer.colors import _CLUSTER_COLORS
-
 
 def _bootstrap_repo_root():
     '''
@@ -45,7 +43,7 @@ def _bootstrap_repo_root():
 
 _bootstrap_repo_root()
 
-from glycographer.colors import get_snfg_color, color_by_magnitude  # noqa: E402
+from glycographer.colors import get_snfg_color, color_by_magnitude, _CLUSTER_COLORS  # noqa: E402
 
 @cmd.extend
 def format_background(bg_rgb='white'):
