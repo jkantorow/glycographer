@@ -664,7 +664,7 @@ def load_cluster_pdbs(path: str, color_by: str = 'cluster', highlight: str = '',
         chosen = ([int(x) for x in str(highlight).split(',') if x.strip()]
                   if highlight else ids[:3])[:3]
         for name in names:
-            cmd.color('grey70', f'{name} and elem C')
+            cmd.color('cluster_other', f'{name} and elem C')
         for slot, cid in enumerate(chosen, start=1):
             if cid in ids:
                 cmd.color(f'cluster_c{slot}', f'cluster_{cid} and elem C')
