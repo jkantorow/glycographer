@@ -29,6 +29,17 @@ Blocks partition the index range exactly, so tasks never collide on an output
 filename and no decoy is dropped. This replaces the manual --start-count-from
 submissions.
 
+Output
+------
+Each block is written as one <run_id>_block<NNN>.tar.xz holding its decoys
+plus its manifest and timings under meta/, instead of one file per decoy, to
+keep inode usage down (--loose-pdbs restores loose files). The analysis
+scripts read the archives directly. To fold a finished run into a single
+<run_id>.tar.xz, chain merge_glycandock_blocks.py after the array:
+
+    jid=$(sbatch --parsable --array=0-41 scripts/slurm/run_glycandock.sh ...)
+    sbatch --dependency=afterok:$jid scripts/slurm/merge_glycandock_blocks.sh <outdir>
+
 Use --dry-run to print the plan (block slices, seeds, output names, resolved
 config) without initializing Rosetta -- it works on machines without PyRosetta.
 '''
@@ -38,6 +49,7 @@ import json
 import os
 import sys
 
+from glycographer.archive import block_archive_name, read_block_manifest
 from glycographer.sample import (
     GlycanDockConfig, STAGE_1_2_OPTIONS, STAGE_2_OPTIONS,
     block_seed, block_slice, check_options, check_setters, decoy_name,
@@ -57,12 +69,26 @@ def _env_int(name, default):
         return default
 
 
-def _block_outputs(outdir, outprefix, run_id, block_index, indices):
+def _block_outputs(outdir, outprefix, run_id, block_index, indices, archive):
     '''Every file run_block would write for this block.'''
+    if archive:
+        return [os.path.join(outdir, block_archive_name(run_id, block_index))]
     paths = [os.path.join(outdir, decoy_name(outprefix, i)) for i in indices]
     paths.append(os.path.join(outdir, f'{run_id}_block{block_index:03d}_manifest.json'))
     paths.append(os.path.join(outdir, f'{run_id}_block{block_index:03d}_timings.jsonl'))
     return paths
+
+
+def _read_block_manifest(block_files, archive):
+    '''The finished block's manifest, or None if the block is not complete.'''
+    if archive:
+        path = block_files[0]
+        return read_block_manifest(path) if os.path.exists(path) else None
+    try:
+        with open(block_files[-2]) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 _NO_PYROSETTA = '''\
@@ -179,9 +205,12 @@ def build_parser():
     par.add_argument('--no-reuse-template', action='store_true',
                      help='Re-read the input PDB for every decoy instead of copying a template '
                           'pose. Slower; restores the exact legacy read-per-decoy behavior.')
+    par.add_argument('--loose-pdbs', action='store_true',
+                     help='Write one PDB per decoy plus a separate manifest and timings file, '
+                          'instead of one tar.xz archive per block.')
     par.add_argument('--overwrite', action='store_true',
-                     help="Replace this block's existing decoys, manifest and timings. Without "
-                          'it the run refuses to start if any of them already exist.')
+                     help="Replace this block's existing archive (or decoys, manifest and "
+                          'timings). Without it the run refuses to start if any already exist.')
     par.add_argument('--resume', action='store_true',
                      help='Skip blocks that already finished (manifest present) and rerun '
                           'unfinished ones, replacing their partial outputs. Resubmit the '
@@ -292,32 +321,26 @@ def main():
     # The manifest is written last, so a readable one covering exactly this
     # block's indices means the block finished. With --resume such blocks are
     # skipped and anything else (e.g. a walltime kill) is rerun from scratch.
-    manifest_path = _block_outputs(args.outdir, outprefix, run_id,
-                                   block_index, indices)[-2]
-    complete = False
-    if os.path.exists(manifest_path):
-        try:
-            with open(manifest_path) as f:
-                done = json.load(f)
-        except (OSError, ValueError):
-            done = None
-        if done is not None and done.get('indices') != indices:
-            print(f'Error: {os.path.basename(manifest_path)} covers decoys '
-                  f'{done.get("indices")[:3]}... but block {block_index} of {n_blocks} '
-                  f'is now {indices[:3]}... -- -n or --n-blocks differs from the '
-                  f'original run.', file=sys.stderr)
-            return 1
-        complete = done is not None
+    archive = not args.loose_pdbs
+    block_files = _block_outputs(args.outdir, outprefix, run_id, block_index,
+                                 indices, archive)
+    done = _read_block_manifest(block_files, archive)
+    if done is not None and done.get('indices') != indices:
+        print(f'Error: finished block {block_index} covers decoys '
+              f'{done.get("indices")[:3]}... but block {block_index} of {n_blocks} '
+              f'is now {indices[:3]}... -- -n or --n-blocks differs from the '
+              f'original run.', file=sys.stderr)
+        return 1
+    complete = done is not None
     if args.resume and complete:
         print(f'Block {block_index} of {n_blocks} already complete '
-              f'({os.path.basename(manifest_path)}). Skipping.')
+              f'({os.path.basename(block_files[0] if archive else block_files[-2])}). '
+              f'Skipping.')
         return 0
 
     # Seeds depend only on (run_id, block_index), so a resubmission into the
     # same outdir would silently regenerate and clobber identical decoys.
-    existing = [p for p in _block_outputs(args.outdir, outprefix, run_id,
-                                          block_index, indices)
-                if os.path.exists(p)]
+    existing = [p for p in block_files if os.path.exists(p)]
     if existing and not (args.overwrite or args.resume) and not args.dry_run:
         print(f'Error: block {block_index} of {n_blocks} would overwrite '
               f'{len(existing)} existing file(s) in {os.path.abspath(args.outdir)}:',
@@ -341,8 +364,10 @@ def main():
         print(f'decoys       : {len(indices)} of {args.nstruct} total '
               f'({indices[0]}..{indices[-1]})')
         print(f'seed         : {seed}')
-        print(f'first output : {decoy_name(outprefix, indices[0])}')
-        print(f'last output  : {decoy_name(outprefix, indices[-1])}')
+        if archive:
+            print(f'archive      : {os.path.basename(block_files[0])}')
+        print(f'first decoy  : {decoy_name(outprefix, indices[0])}')
+        print(f'last decoy   : {decoy_name(outprefix, indices[-1])}')
         if existing:
             print(f'existing     : {len(existing)} output file(s) already present -- '
                   + ('will be overwritten' if args.overwrite or args.resume
@@ -376,13 +401,15 @@ def main():
         outdir=args.outdir,
         run_id=run_id,
         block_index=block_index,
+        n_blocks=n_blocks,
         seed=seed,
         reuse_template=not args.no_reuse_template,
+        archive=archive,
         verbose=not args.quiet,
     )
 
     print(f'\nWrote {len(manifest["outputs"])} decoys to '
-          f'{os.path.abspath(args.outdir)}')
+          f'{manifest.get("archive") or os.path.abspath(args.outdir)}')
     return 0
 
 

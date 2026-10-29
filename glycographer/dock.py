@@ -14,6 +14,9 @@ from MDAnalysis.coordinates.memory import MemoryReader
 import numpy as np
 import pandas as pd
 
+from glycographer.archive import (abs_pose_path, iter_pose_texts, pose_name,
+                                  split_pose_path)
+
 #from pyrosetta import init, pose_from_pdb, Vector1
 #from pyrosetta.rosetta.protocols.rigid import RigidBodyRandomizeMover, partner_downstream
 #from pyrosetta.rosetta.protocols.docking import setup_foldtree
@@ -96,7 +99,8 @@ class GlycanDockEnsemble:
         Parameters
         ----------
         pose_list : list of str
-            Paths to GlycanDock output PDB files.
+            Paths to GlycanDock output PDB files, plain or as
+            '<archive>::<member>' (see utils.build_pose_list).
         in_complex_pdb, grid_pdb : str, optional
             Paths to the input complex / grid PDBs, used to build run_id.
         run_type, run_id : str, optional
@@ -365,7 +369,9 @@ class GlycanDockEnsemble:
         Parameters
         ----------
         pose_list : list of str
-            Paths to GlycanDock output PDB files.
+            Paths to GlycanDock output PDB files, plain or as
+            '<archive>::<member>'. Archive members are read in memory, one
+            sequential pass per archive.
         score_names : list of str, optional
             Per-pose GlycanDock score labels to extract. Defaults to
             _SCORE_FEATURES.
@@ -383,11 +389,14 @@ class GlycanDockEnsemble:
             so to_pdb(include_receptor=True) can serialize them from memory
             (default False).
         '''
-        # Create a list of each pose file:
+        # Create a list of each pose file. Sorting on the decoy name (not the
+        # full path) gives the same model order whether decoys are loose
+        # files, block archives, or one merged archive.
         if not self.pose_files:
-            pose_files = sorted(pose_list)
+            pose_files = sorted(pose_list, key=pose_name)
             self.pose_files = pose_files
-            self._pose_dir = os.path.dirname(pose_files[0])
+            archive, member = split_pose_path(pose_files[0])
+            self._pose_dir = os.path.dirname(archive or member)
 
         if not self._n_poses:
             self._n_poses = len(self.pose_files)
@@ -418,19 +427,22 @@ class GlycanDockEnsemble:
         cols = {k: [] for k in ('model_num', 'residue_num', 'residue_label',
                                  'is_glycan', 'term', 'weighted')}
 
-        # Per-model coordinate accumulators for the in-memory structure. Atom
+        # Per-model coordinate slots for the in-memory structure. Atom
         # identity (names/resids/elements/order) is constant across poses, so
         # the topology is captured once from model 1; only coordinates vary.
-        lig_coords_per_model = []
-        rec_coords_per_model = []
+        # Archive members can arrive in any order, so poses are placed by
+        # model number and atom counts are checked against the first one read.
+        model_of = {p: i + 1 for i, p in enumerate(self.pose_files)}
+        lig_coords_per_model = [None] * self._n_poses
+        rec_coords_per_model = [None] * self._n_poses
+        first_lig = first_rec = None
 
         # Parse each pose file to extract data:
-        for i, file in enumerate(self.pose_files):
-            model_num = i + 1
-            scoredata.loc[model_num, 'pose_file'] = os.path.abspath(file)
+        for file, text in iter_pose_texts(self.pose_files):
+            model_num = model_of[file]
+            scoredata.loc[model_num, 'pose_file'] = abs_pose_path(file)
 
-            with open(file, 'r') as f:
-                lines = f.readlines()
+            lines = text.splitlines(keepends=True)
 
             glycan_labels = []
 
@@ -445,8 +457,10 @@ class GlycanDockEnsemble:
                     f'{file}. Check _lig_chain_id.')
             if model_num == 1:
                 self._capture_ligand_topology(lig_recs)
-            self._check_atom_count(lig_recs, self._lig_template, file, 'ligand')
-            lig_coords_per_model.append(self._coords_from_records(lig_recs))
+            first_lig = first_lig or lig_recs
+            self._check_atom_count(lig_recs, first_lig, file, 'ligand')
+            lig_coords_per_model[model_num - 1] = \
+                self._coords_from_records(lig_recs)
 
             if store_receptor:
                 rec_recs = [ln for ln in lines
@@ -454,10 +468,10 @@ class GlycanDockEnsemble:
                             and ln[21] == self._rec_chain_id]
                 if model_num == 1:
                     self._rec_template = list(rec_recs)
-                self._check_atom_count(rec_recs, self._rec_template, file,
-                                       'receptor')
-                rec_coords_per_model.append(
-                    self._coords_from_records(rec_recs))
+                first_rec = first_rec or rec_recs
+                self._check_atom_count(rec_recs, first_rec, file, 'receptor')
+                rec_coords_per_model[model_num - 1] = \
+                    self._coords_from_records(rec_recs)
 
             # Extract per-pose GlycanDock scores and glycan residue labels:
             for line in lines:
@@ -506,6 +520,9 @@ class GlycanDockEnsemble:
                 'term': pd.Categorical(cols['term']),
                 'weighted': np.asarray(cols['weighted'], dtype=np.float32),
             })
+            if not self.residue_energies['model_num'].is_monotonic_increasing:
+                self.residue_energies = self.residue_energies.sort_values(
+                    'model_num', kind='stable', ignore_index=True)
 
         return self
 
@@ -523,7 +540,8 @@ class GlycanDockEnsemble:
         if template is not None and len(records) != len(template):
             raise ValueError(
                 f'{which} atom count in {source_file} ({len(records)}) differs '
-                f'from model 1 ({len(template)}); poses must share topology.')
+                f'from the first pose read ({len(template)}); poses must '
+                f'share topology.')
 
     def _capture_ligand_topology(self, records):
         '''
@@ -721,17 +739,21 @@ class GlycanDockEnsemble:
                 f'receptor coords and no pose_files to re-read. Re-run '
                 f'read_poses with store_receptor=True.')
 
+        # Archive members may arrive out of order, so collect each model's
+        # records first and write them in model order.
+        model_of = {p: i for i, p in enumerate(self.pose_files)}
+        records = [None] * len(self.pose_files)
+        for file, text in iter_pose_texts(self.pose_files):
+            records[model_of[file]] = [
+                line for line in text.splitlines(keepends=True)
+                if line.startswith(('ATOM', 'HETATM'))
+                and (line[21] == self._lig_chain_id or (
+                    include_receptor and line[21] == self._rec_chain_id))]
+
         ensemble_lines = []
-        for i, file in enumerate(self.pose_files):
+        for i, recs in enumerate(records):
             ensemble_lines.append(f'MODEL     {i + 1:4d}\n')
-            with open(file, 'r') as f:
-                for line in f:
-                    if not line.startswith(('ATOM', 'HETATM')):
-                        continue
-                    chain = line[21]
-                    if chain == self._lig_chain_id or (
-                            include_receptor and chain == self._rec_chain_id):
-                        ensemble_lines.append(line)
+            ensemble_lines.extend(recs)
             ensemble_lines.append('ENDMDL\n')
 
         with open(outname, 'w') as f:
@@ -782,139 +804,6 @@ class GlycanDockEnsemble:
         self.residue_energies.to_parquet(outname, index=False)
         return outname
 
-    def extract_interface_energies(self, models=None, score_function=None,
-                                   init_flags='-include_sugars -mute all',
-                                   store=True, verbose=True):
-        '''
-        Compute per-term interaction energies between each glycan ligand
-        residue and the protein residues it contacts, by re-scoring poses in
-        PyRosetta and decomposing the two-body energies per residue pair.
-
-        REQUIRES PyRosetta -- run this on the Ubuntu partition / HPC. The
-        import is local so dock.py still imports on systems without it.
-
-        Why this and not the POSE_ENERGIES_TABLE: that table stores each
-        residue's *total* energy with every two-body term summed and split
-        50/50 between partners, so the residue->residue pairing is lost and
-        cannot be recovered. ScoreFunction.residue_pair_energy recomputes the
-        full two-body energy for one (glycan, protein) pair -- including
-        hydrogen bonds -- which is exactly the Newhouse-style decomposition.
-
-        Re-scoring is the expensive step, so pass a filtered/clustered subset
-        of `models` (e.g. from filter_by_score or a dominant cluster from
-        analysis.cluster_ensemble_poses).
-
-        Parameters
-        ----------
-        models : list of int, optional
-            scoredata index (model_num) values to process. Defaults to all.
-        score_function : pyrosetta ScoreFunction, optional
-            Defaults to ref2015 (the GlycanDock scoring function). Pass the
-            exact score function used for docking for full consistency.
-        init_flags : str
-            Flags for pyrosetta.init() if PyRosetta is not already
-            initialized. Must include sugar support to read glycan PDBs.
-        store : bool
-            Store the result on self.interface_energies.
-
-        Returns
-        -------
-        pd.DataFrame (long format) with columns:
-            model_num, glycan_resnum, glycan_label,
-            protein_resnum, protein_label, term, weighted
-        '''
-        import pyrosetta
-        from pyrosetta import pose_from_pdb
-        from pyrosetta.rosetta.core.scoring import (
-            EMapVector, name_from_score_type)
-
-        # Initialize PyRosetta only if needed (defensive about API name):
-        try:
-            initialized = pyrosetta.rosetta.basic.was_init_called()
-        except Exception:
-            initialized = False
-        if not initialized:
-            pyrosetta.init(init_flags)
-
-        sfxn = score_function or pyrosetta.get_fa_scorefxn()
-        weights = sfxn.weights()
-        nonzero_terms = list(sfxn.get_nonzero_weighted_scoretypes())
-
-        if self.scoredata is None:
-            raise ValueError('No scoredata; run read_poses/from_poses first.')
-        if models is None:
-            models = list(self.scoredata.index)
-        file_for = dict(zip(self.scoredata.index, self.scoredata['pose_file']))
-
-        # Reuse the IUPAC labels already parsed from the energies table:
-        gly_label_map = {}
-        if self.residue_energies is not None:
-            gsub = self.residue_energies[self.residue_energies.is_glycan]
-            gly_label_map = dict(zip(gsub.residue_num.astype(int),
-                                     gsub.residue_label.astype(str)))
-
-        cols = {k: [] for k in ('model_num', 'glycan_resnum', 'glycan_label',
-                                 'protein_resnum', 'protein_label', 'term',
-                                 'weighted')}
-
-        for m in models:
-            pose = pose_from_pdb(file_for[m])
-            sfxn(pose)
-            energy_graph = pose.energies().energy_graph()
-            pdb_info = pose.pdb_info()
-            n = pose.total_residue()
-
-            glycan_res = [i for i in range(1, n + 1)
-                          if pose.residue(i).is_carbohydrate()]
-
-            for i in glycan_res:
-                res_i = pose.residue(i)
-                gly_label = gly_label_map.get(i, f'glycan_{i}')
-                for j in range(1, n + 1):
-                    res_j = pose.residue(j)
-                    if res_j.is_carbohydrate() or not res_j.is_protein():
-                        continue
-                    # Only pairs with a scoring edge can have nonzero
-                    # two-body energy -- this is the natural contact filter.
-                    if energy_graph.find_energy_edge(i, j) is None:
-                        continue
-                    emap = EMapVector()
-                    sfxn.residue_pair_energy(res_i, res_j, pose, emap)
-
-                    if pdb_info is not None:
-                        prot_label = f'{res_j.name3()}{pdb_info.number(j)}'
-                    else:
-                        prot_label = f'{res_j.name3()}{j}'
-
-                    for st in nonzero_terms:
-                        val = emap[st] * weights[st]
-                        if val == 0.0:
-                            continue
-                        cols['model_num'].append(m)
-                        cols['glycan_resnum'].append(i)
-                        cols['glycan_label'].append(gly_label)
-                        cols['protein_resnum'].append(j)
-                        cols['protein_label'].append(prot_label)
-                        cols['term'].append(name_from_score_type(st))
-                        cols['weighted'].append(val)
-
-            if verbose:
-                print(f'Decomposed interface energies for model {m}')
-
-        interface_energies = pd.DataFrame({
-            'model_num': np.asarray(cols['model_num'], dtype=np.int32),
-            'glycan_resnum': np.asarray(cols['glycan_resnum'], dtype=np.int32),
-            'glycan_label': pd.Categorical(cols['glycan_label']),
-            'protein_resnum': np.asarray(cols['protein_resnum'], dtype=np.int32),
-            'protein_label': pd.Categorical(cols['protein_label']),
-            'term': pd.Categorical(cols['term']),
-            'weighted': np.asarray(cols['weighted'], dtype=np.float32),
-        })
-
-        if store:
-            self.interface_energies = interface_energies
-        return interface_energies
-
     def interface_energies_to_parquet(self, outname=None):
         '''
         Dump the long-format glycan-protein interface energy table to Parquet.
@@ -923,7 +812,7 @@ class GlycanDockEnsemble:
         if self.interface_energies is None:
             raise ValueError(
                 f'No interface energy data found in {self}; run '
-                f'extract_interface_energies() first (needs PyRosetta).')
+                f'analysis.extract_interface_energies() first (needs PyRosetta).')
         if outname is None:
             outname = f'{self.run_id}_interface_energies.parquet'
         self.interface_energies.to_parquet(outname, index=False)

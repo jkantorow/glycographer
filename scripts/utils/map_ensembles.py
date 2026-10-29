@@ -59,6 +59,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from glycographer.archive import strip_archive_ext
 from glycographer.utils import build_pose_list
 from glycographer.dock import GlycanDockEnsemble
 from glycographer.map import (
@@ -136,7 +137,8 @@ class EnsembleJob:
 
     def __post_init__(self):
         if not self.label:
-            self.label = os.path.basename(os.path.normpath(self.posedir))
+            self.label = strip_archive_ext(
+                os.path.basename(os.path.normpath(self.posedir)))
 
     @property
     def needs_energies(self):

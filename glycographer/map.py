@@ -438,8 +438,8 @@ class ResidueBoltzmannMapper(BoltzmannMapper):
     POSE_ENERGIES_TABLE totals in residue_energies are each residue's absolute
     REF15 energy (dominated by internal strain, typically POSITIVE for sugars)
     and are not a measure of binding. interface_energies comes from
-    extract_interface_energies() and REQUIRES PyRosetta (run it on the HPC
-    partition), so populate/load it before mapping.
+    analysis.extract_interface_energies() and REQUIRES PyRosetta (run it on
+    the HPC partition), so populate/load it before mapping.
 
     NOTE on residue numbering: the ensemble PDB numbers ligand residues by
     chain-X resSeq (e.g. 1, 2) while interface_energies['glycan_resnum'] uses
@@ -459,7 +459,7 @@ class ResidueBoltzmannMapper(BoltzmannMapper):
             raise ValueError(
                 'ResidueBoltzmannMapper maps per-residue *interface* '
                 'interaction energies from ensemble.interface_energies, which '
-                'is None. Run extract_interface_energies() (requires PyRosetta) '
+                'is None. Run analysis.extract_interface_energies() (requires PyRosetta) '
                 'or load a precomputed interface_energies parquet first. Note: '
                 'residue_energies (POSE_ENERGIES_TABLE totals) is NOT usable '
                 'here -- those are absolute residue energies, not binding.')

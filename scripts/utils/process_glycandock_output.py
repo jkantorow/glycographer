@@ -7,10 +7,13 @@ the per-pose scores, cluster summary, ensemble PDB, and residue energies.
 Two input modes:
 
   1. From raw poses (the normal post-docking step). Parses every pose once and
-     clusters straight from the in-memory coordinates:
+     clusters straight from the in-memory coordinates. The poses can be loose
+     PDBs, the per-block archives run_glycandock.py writes, or one archive:
 
        process_glycandock_output.py runs/1k9i_full --outdir processed \\
            --cluster-cutoff 2.0 --min-cluster-size 6
+
+       process_glycandock_output.py runs/1k9i_full.tar.xz --outdir processed
 
   2. Re-cluster previously processed output (e.g. to try other cutoffs)
      without re-parsing thousands of pose files:
@@ -50,6 +53,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from glycographer.archive import strip_archive_ext
 from glycographer.utils import build_pose_list
 from glycographer.dock import GlycanDockEnsemble
 from glycographer.analysis import (cluster_ensemble_poses, rmsd_to_reference,
@@ -69,7 +73,8 @@ def _load_ensemble(args, parser):
                     f'No poses found in {args.posedir} with ids in range '
                     f'{args.poserange[0]}-{args.poserange[1]}.')
             raise SystemExit(f'No .pdb poses found in {args.posedir}.')
-        outprefix = args.outprefix or os.path.basename(os.path.normpath(args.posedir))
+        outprefix = args.outprefix or strip_archive_ext(
+            os.path.basename(os.path.normpath(args.posedir)))
         ens = GlycanDockEnsemble.from_poses(
             pose_list=pose_list,
             run_id=outprefix,
@@ -103,8 +108,9 @@ def main():
 
     # Input
     parser.add_argument('posedir', type=str, nargs='?', default=None,
-                        help='Directory where output poses are located. Omit '
-                             'when re-clustering with --ensemble-pdb/--scores-csv.')
+                        help='Directory of output poses (loose .pdb files and/or tar '
+                             'archives of them), or a single archive. Omit when '
+                             're-clustering with --ensemble-pdb/--scores-csv.')
     parser.add_argument('-range', '--poserange', type=int, nargs=2, required=False,
                         metavar=('START', 'STOP'),
                         help='Inclusive numeric range of pose ids to use for constructing the ensemble (defaults to loading all poses detected within posedir)')

@@ -9,7 +9,6 @@
 #SBATCH --mem=2G
 #SBATCH --time=06:00:00
 #SBATCH --output=./gdock_%A_%a.out
-#SBATCH --error=./gdock_%A_%a.err
 
 # ====================== #
 # Run the GlycanDock
@@ -59,7 +58,18 @@
 #     MaxRSS climbs on large blocks, raise it.
 #
 # Logs are written per task via %A_%a (job id, array index). Without that,
-# every task in the array would clobber the same file.
+# every task in the array would clobber the same file. stderr goes into the
+# same .out file (there is no --error), which halves the log inodes per run.
+#
+# Outputs: each task writes a single <run_id>_block<NNN>.tar.xz into --outdir
+# (decoys + manifest + timings), staging decoys in node-local $TMPDIR (else
+# /tmp) so per-decoy files never touch the project filesystem. To fold the
+# whole run into one <run_id>.tar.xz once every task has succeeded:
+#
+#   jid=$(sbatch --parsable --array=0-41 scripts/slurm/run_glycandock.sh \
+#       complex.pdb -n 1000 --grid grid.pdb --outdir runs/1k9i)
+#   sbatch --dependency=afterok:$jid scripts/slurm/merge_glycandock_blocks.sh \
+#       runs/1k9i --logs "gdock_${jid}_*.out"
 
 CONDA_PATH="${CONDA_PATH:-}"
 GLYCOGRAPHER_PATH="${GLYCOGRAPHER_PATH:-}"

@@ -49,8 +49,13 @@ from contextlib import contextmanager
 from typing import Dict, List, Optional, Sequence, get_type_hints
 import json
 import os
+import shutil
+import tarfile
+import tempfile
 import time
 import zlib
+
+from glycographer.archive import META_DIR, add_bytes, block_archive_name
 
 _TRUE = {'true', 't', 'yes', 'y', '1', 'on'}
 _FALSE = {'false', 'f', 'no', 'n', '0', 'off'}
@@ -828,8 +833,10 @@ def run_block(config: GlycanDockConfig, complex_pdb: str, *,
               outdir: str = '.',
               run_id: Optional[str] = None,
               block_index: int = 0,
+              n_blocks: Optional[int] = None,
               seed: Optional[int] = None,
               reuse_template: bool = True,
+              archive: bool = True,
               write_manifest: bool = True,
               initialize: bool = True,
               verbose: bool = True) -> Dict:
@@ -840,6 +847,14 @@ def run_block(config: GlycanDockConfig, complex_pdb: str, *,
     Decoy indices are assigned explicitly (either `indices`, or `count` of them
     starting at `start`), so blocks can never collide on an output filename and
     the old --start-count-from bookkeeping goes away.
+
+    By default the block is written as a single <run_id>_block<NNN>.tar.xz in
+    `outdir` rather than one PDB per decoy, to keep inode usage down. Each
+    decoy is dumped to a node-local temporary directory ($TMPDIR, else /tmp),
+    added to <archive>.partial, and deleted; the manifest and timings are
+    added under meta/ last, and the archive is renamed into place only once
+    the block has finished. A block killed mid-run therefore leaves only a
+    .partial file, which a rerun replaces.
 
     Parameters
     ----------
@@ -859,17 +874,28 @@ def run_block(config: GlycanDockConfig, complex_pdb: str, *,
     block_index : int
         Which block this is (e.g. $SLURM_ARRAY_TASK_ID). Only used for seeding
         and provenance.
+    n_blocks : int, optional
+        How many blocks the whole run has. Recorded in the manifest so that
+        merge_block_archives() can tell when a block is missing.
     seed : int, optional
         Explicit RNG seed, overriding block_seed(run_id, block_index). Pass
         seed=-1 to disable seeding and use Rosetta's default.
+    archive : bool
+        Pack the block into one tar.xz (default). False writes loose decoy
+        PDBs, manifest and timings into `outdir`, as before.
+    write_manifest : bool
+        Write the manifest JSON (loose mode only; an archive always gets one,
+        since it marks the block as finished).
     initialize : bool
         Call init_rosetta() first. Pass False if the caller already did.
 
     Returns
     -------
     dict : run manifest (config, inputs, seed, outputs, timing summary). Also
-        written to <outdir>/<run_id>_block<NNN>_manifest.json unless
-        write_manifest is False.
+        packed into the block archive under meta/, or in loose mode written to
+        <outdir>/<run_id>_block<NNN>_manifest.json unless write_manifest is
+        False. `outputs` lists decoy names within the archive, or decoy paths
+        in loose mode.
     '''
     if indices is None:
         if count < 1:
@@ -913,49 +939,86 @@ def run_block(config: GlycanDockConfig, complex_pdb: str, *,
         runner = GlycanDockRunner(config, complex_pdb, grid_pdb=grid_pdb,
                                   reuse_template=reuse_template)
 
-    timings_path = os.path.join(outdir, f'{run_id}_block{block_index:03d}_timings.jsonl')
+    block_tag = f'{run_id}_block{block_index:03d}'
+    timings_name = f'{block_tag}_timings.jsonl'
+    manifest_name = f'{block_tag}_manifest.json'
     outputs: List[str] = []
     per_decoy: List[Dict[str, float]] = []
 
-    with open(timings_path, 'w') as tf:
-        for i in indices:
-            outname = os.path.join(outdir, decoy_name(outprefix, i))
-            t = runner.run_decoy(i, outname)
-            outputs.append(outname)
-            per_decoy.append(t)
-            tf.write(json.dumps(t) + '\n')
-            tf.flush()  # survive a walltime kill with partial timing data
-            if verbose:
-                print(f'[{run_id} block {block_index}] decoy {i} '
-                      f'-> {os.path.basename(outname)} ({t["total"]:.1f}s)')
+    tar = scratch = None
+    if archive:
+        archive_path = os.path.join(outdir, block_archive_name(run_id, block_index))
+        scratch = tempfile.mkdtemp(prefix=f'{block_tag}_')
+        decoy_dir = scratch
+        timings_path = os.path.join(scratch, timings_name)
+        tar = tarfile.open(archive_path + '.partial', 'w:xz')
+    else:
+        decoy_dir = outdir
+        timings_path = os.path.join(outdir, timings_name)
 
-    summary = _summarize_timings(per_decoy)
-    manifest = {
-        'run_id': run_id,
-        'block_index': block_index,
-        'indices': indices,
-        'seed': seed,
-        'config': config.as_dict(),
-        'inputs': {
-            'complex_pdb': os.path.abspath(complex_pdb),
-            'grid_pdb': os.path.abspath(grid_pdb) if grid_pdb else None,
-            'native': os.path.abspath(native) if native else None,
-            'cst_file': os.path.abspath(cst_file) if cst_file else None,
-            'options_file': os.path.abspath(options_file),
-        },
-        'rosetta_flags': flag_string,
-        'outputs': [os.path.abspath(p) for p in outputs],
-        'timings_jsonl': os.path.abspath(timings_path),
-        'timing_summary': summary,
-        'setup_seconds': setup_timings.get('runner_setup'),
-    }
+    try:
+        with open(timings_path, 'w') as tf:
+            for i in indices:
+                name = decoy_name(outprefix, i)
+                outname = os.path.join(decoy_dir, name)
+                t = runner.run_decoy(i, outname)
+                if tar is not None:
+                    with _timed(t, 'archive'):
+                        tar.add(outname, arcname=name)
+                        os.remove(outname)
+                    t['total'] += t['archive']
+                    outputs.append(name)
+                else:
+                    outputs.append(os.path.abspath(outname))
+                per_decoy.append(t)
+                tf.write(json.dumps(t) + '\n')
+                tf.flush()  # loose mode: survive a walltime kill with partial timings
+                if verbose:
+                    print(f'[{run_id} block {block_index}] decoy {i} '
+                          f'-> {name} ({t["total"]:.1f}s)')
 
-    if write_manifest:
-        manifest_path = os.path.join(
-            outdir, f'{run_id}_block{block_index:03d}_manifest.json')
-        with open(manifest_path, 'w') as f:
-            json.dump(manifest, f, indent=2)
-        manifest['manifest_path'] = os.path.abspath(manifest_path)
+        summary = _summarize_timings(per_decoy)
+        manifest = {
+            'run_id': run_id,
+            'block_index': block_index,
+            'n_blocks': n_blocks,
+            'indices': indices,
+            'seed': seed,
+            'config': config.as_dict(),
+            'inputs': {
+                'complex_pdb': os.path.abspath(complex_pdb),
+                'grid_pdb': os.path.abspath(grid_pdb) if grid_pdb else None,
+                'native': os.path.abspath(native) if native else None,
+                'cst_file': os.path.abspath(cst_file) if cst_file else None,
+                'options_file': os.path.abspath(options_file),
+            },
+            'rosetta_flags': flag_string,
+            'outputs': outputs,
+            'timing_summary': summary,
+            'setup_seconds': setup_timings.get('runner_setup'),
+        }
+
+        if tar is not None:
+            manifest['archive'] = os.path.abspath(archive_path)
+            manifest['timings_jsonl'] = f'{META_DIR}/{timings_name}'
+            tar.add(timings_path, arcname=manifest['timings_jsonl'])
+            # Written last: a readable manifest means the block finished.
+            add_bytes(tar, f'{META_DIR}/{manifest_name}',
+                      json.dumps(manifest, indent=2).encode())
+            tar.close()
+            os.replace(archive_path + '.partial', archive_path)
+        else:
+            manifest['timings_jsonl'] = os.path.abspath(timings_path)
+            if write_manifest:
+                manifest_path = os.path.join(outdir, manifest_name)
+                with open(manifest_path, 'w') as f:
+                    json.dump(manifest, f, indent=2)
+                manifest['manifest_path'] = os.path.abspath(manifest_path)
+    finally:
+        if tar is not None and not tar.closed:
+            tar.close()
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
 
     if verbose:
         _print_timing_summary(summary, len(indices))
