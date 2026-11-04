@@ -546,7 +546,8 @@ def extract_pose_clusters(ens_name: str, scoredata:str):
         if pd.isna(cluster_id) or cluster_id == '':
             continue
 
-        cluster_name = f'cluster_{int(cluster_id)}'
+        cluster_name = f'{ens_name}_cluster_{int(cluster_id)}'
+        cmd.delete(cluster_name)
         cluster_models = df[df['cluster_id'] == cluster_id]['model_num'].tolist()
 
         cluster_dict[cluster_name] = cluster_models
@@ -556,6 +557,8 @@ def extract_pose_clusters(ens_name: str, scoredata:str):
                        source_state=int(model),
                        target_state=-1)
             
+    cmd.group(f'{ens_name}_clusters', ' '.join(cluster_dict))
+
     print('Cluster: Models')
     for key, val in cluster_dict.items():
         print(f'{key}: {val}')
@@ -579,11 +582,17 @@ def _model_blocks(path):
 
 @cmd.extend
 def load_cluster_pdbs(path: str, color_by: str = 'cluster', highlight: str = '',
-                      all_states: str = '1', group: str = 'clusters'):
+                      all_states: str = '1', prefix: str = '', group: str = ''):
     '''
     Load cluster PDBs written by analysis.write_cluster_pdbs (or the
     process_glycandock_output.py --cluster-pdbs flag), one multistate object
-    per cluster, grouped under `group`.
+    per cluster.
+
+    Objects are named after their file, <prefix>_cluster_<id> (e.g.
+    2hrl-native2df3_2000p_cluster_01), and grouped per run under
+    <prefix>_clusters, so clusters from different runs never share a name.
+    Re-running the command replaces those objects instead of appending
+    states to them.
 
     States follow the order in the file; the REMARK table at the top of each
     file maps state order to model_num, and each atom's B-factor holds its
@@ -596,41 +605,55 @@ def load_cluster_pdbs(path: str, color_by: str = 'cluster', highlight: str = '',
     color_by : {'cluster', 'score'}
         'cluster': carbons of up to three highlighted clusters in the funnel
         palette, the rest grey. 'score': B-factor spectrum on one shared
-        range across all clusters, blue = most favorable. Score mode loads
-        each pose as its own object (cluster_<id>_m<model_num>, grouped
-        under cluster_<id>), since PyMOL shares colors and B-factors across
-        states -- keep n modest for this mode.
+        range across everything loaded, blue = most favorable. Score mode
+        loads each pose as its own object (<prefix>_cluster_<id>_m<model_num>,
+        grouped under <prefix>_cluster_<id>), since PyMOL shares colors and
+        B-factors across states -- keep n modest for this mode.
     highlight : str
         Comma-separated cluster ids to color with color_by='cluster', e.g.
-        '1,2,13' to match the funnel plot. Default: the first three files.
+        '1,2,13' to match the funnel plot. Applied to each run loaded.
+        Default: the first three clusters of each run.
     all_states : '1' or '0'
         Overlay every pose of a cluster at once (default) instead of
         stepping through states.
+    prefix : str
+        Only load files from this run (<prefix>_cluster_*.pdb) when path is a
+        directory shared by several runs. Default: every run in path.
+    group : str
+        Optional parent group; the per-run <prefix>_clusters groups are
+        nested inside it.
 
     PyMOL usage:
-        load_cluster_pdbs processed/clusters, highlight=1,2,13
-        load_cluster_pdbs processed/clusters, color_by=score
+        load_cluster_pdbs data/clusters, prefix=2hrl-native2df3_2000p, highlight=1,2,13
+        load_cluster_pdbs data/clusters/2hrl-native2df3_2000p_cluster_*.pdb
+        load_cluster_pdbs data/clusters, color_by=score
     '''
     import glob
     import re
 
     path = os.path.expanduser(path)
-    pattern = os.path.join(path, '*_cluster_*.pdb') if os.path.isdir(path) else path
+    if os.path.isdir(path):
+        pattern = os.path.join(path, f'{glob.escape(prefix) if prefix else "*"}_cluster_*.pdb')
+    else:
+        pattern = path
     paths = sorted(glob.glob(pattern))
     if not paths:
         print(f'No cluster PDBs match {pattern}')
-        return []
+        return {}
 
     for name, rgb in _CLUSTER_COLORS.items():
         cmd.set_color(name, rgb)
 
-    ids = []
-    names = []
+    # {run prefix: [(cluster_id, object name), ...]}, in file order.
+    runs = {}
     pose_objs = []
     for p in paths:
-        m = re.search(r'_cluster_(\d+)\.pdb$', os.path.basename(p))
-        cid = int(m.group(1)) if m else len(ids) + 1
-        name = f'cluster_{cid}'
+        stem = os.path.splitext(os.path.basename(p))[0]
+        m = re.match(r'(?P<run>.+)_cluster_(?P<cid>\d+)$', stem)
+        run = m.group('run') if m else stem
+        cid = int(m.group('cid')) if m else len(runs.get(run, [])) + 1
+        name = cmd.get_legal_name(stem)
+        cmd.delete(name)   # reloading must replace, not append states
         if color_by == 'score':
             # Atom colors and B-factors are shared by all states of a PyMOL
             # object, so each pose is read as its own object (named by its
@@ -647,9 +670,9 @@ def load_cluster_pdbs(path: str, color_by: str = 'cluster', highlight: str = '',
             if str(all_states) not in ('0', 'false', 'False'):
                 cmd.set('all_states', 1, name)
         cmd.show_as('sticks', name)
-        ids.append(cid)
-        names.append(name)
+        runs.setdefault(run, []).append((cid, name))
 
+    names = [name for members in runs.values() for _, name in members]
     if color_by == 'score':
         objs = ' or '.join(pose_objs)
         stored.b = []
@@ -659,16 +682,27 @@ def load_cluster_pdbs(path: str, color_by: str = 'cluster', highlight: str = '',
         cmd.color('atomic', f'({objs}) and not elem C')
         print(f'Colored by score (B-factor) from {lo:.2f} (blue) to {hi:.2f} (red)')
     else:
-        chosen = ([int(x) for x in str(highlight).split(',') if x.strip()]
-                  if highlight else ids[:3])[:3]
-        for name in names:
-            cmd.color('cluster_other', f'{name} and elem C')
-        for slot, cid in enumerate(chosen, start=1):
-            if cid in ids:
-                cmd.color(f'cluster_c{slot}', f'cluster_{cid} and elem C')
+        wanted = [int(x) for x in str(highlight).split(',') if x.strip()]
+        for members in runs.values():
+            by_id = dict(members)
+            chosen = (wanted or [cid for cid, _ in members])[:3]
+            for _, name in members:
+                cmd.color('cluster_other', f'{name} and elem C')
+            for slot, cid in enumerate(chosen, start=1):
+                if cid in by_id:
+                    cmd.color(f'cluster_c{slot}', f'{by_id[cid]} and elem C')
         cmd.color('atomic', f'({" or ".join(names)}) and not elem C')
 
-    cmd.group(group, ' '.join(names))
-    for name in names:
-        print(f'{name}: {cmd.count_states(name) if color_by != "score" else len(cmd.get_object_list(name))} poses')
-    return names
+    groups = {}
+    for run, members in runs.items():
+        gname = cmd.get_legal_name(f'{run}_clusters')
+        cmd.group(gname, ' '.join(name for _, name in members))
+        groups[run] = gname
+        print(f'{gname}:')
+        for _, name in members:
+            count = (cmd.count_states(name) if color_by != 'score'
+                     else len(cmd.get_object_list(name)))
+            print(f'  {name}: {count} poses')
+    if group:
+        cmd.group(group, ' '.join(groups.values()))
+    return {run: [name for _, name in members] for run, members in runs.items()}
