@@ -520,43 +520,70 @@ def draw_probe_shells(map_source, probe_labels=None, n=3, mode='absolute',
     return all_names
 
 @cmd.extend
-def extract_pose_clusters(ens_name: str, scoredata:str):
+def extract_pose_clusters(ens_name: str, scoredata: str, clusters: str = '',
+                          all_states: str = '1'):
     '''
-    Extract clusters of poses contained in a scoredata file
-    from a PyMOL-loaded multistate ensemble and display in a
-    PyMOL visualization session.
+    Split a PyMOL-loaded multistate ensemble into one multistate object per
+    pose cluster, using the model_num / cluster_id columns of a scoredata
+    CSV. Objects are named <ens_name>_cluster_<id> and grouped under
+    <ens_name>_clusters; re-running replaces them.
+
+    Parameters
+    ----------
+    ens_name : str
+        The loaded ensemble object (state N = model_num N).
+    scoredata : str
+        Path to the scoredata CSV.
+    clusters : str
+        Comma-separated cluster ids to extract, e.g. '1,2,13'. Default: all.
+    all_states : '1' or '0'
+        Overlay every pose of a cluster at once (default). With '0', each
+        object only draws at global frames up to its own state count, so a
+        small cluster looks empty while the movie sits on a later frame of
+        the full ensemble.
+
+    PyMOL usage:
+        extract_pose_clusters ens, data/scores/run_scoredata.csv, clusters=1,2,13
     '''
     df = pd.read_csv(scoredata)
-
     if 'model_num' not in df.columns or 'cluster_id' not in df.columns:
         print("Error: CSV file must contain 'model_num' and 'cluster_id' columns")
-        return
-    
+        return {}
+
     n_states = cmd.count_states(ens_name)
     if n_states != df['model_num'].max():
-        print(f"Warning: Ensemble has {n_states} states but scoredata contains {df['model_num'].max()} model samples")
+        print(f'Warning: {ens_name} has {n_states} states but scoredata '
+              f'contains {df["model_num"].max()} model samples')
 
-    cluster_ids = df['cluster_id'].dropna().unique()
-    if len(cluster_ids) == 0:
-        print("No clusters found in the scoredata file")
-        return
-    
+    df = df[df['cluster_id'].notna()]
+    ids = sorted(int(c) for c in df['cluster_id'].unique())
+    if clusters:
+        wanted = {int(x) for x in str(clusters).split(',') if x.strip()}
+        ids = [c for c in ids if c in wanted]
+    if not ids:
+        print('No matching clusters found in the scoredata file')
+        return {}
+
     cluster_dict = {}
-    for cluster_id in cluster_ids:
-        if pd.isna(cluster_id) or cluster_id == '':
+    for cid in ids:
+        name = f'{ens_name}_cluster_{cid}'
+        cmd.delete(name)   # re-running must replace, not append states
+        models = [int(m) for m in df.loc[df['cluster_id'] == cid, 'model_num']]
+        skipped = [m for m in models if not 1 <= m <= n_states]
+        models = [m for m in models if 1 <= m <= n_states]
+        if skipped:
+            print(f'Warning: {name} skips model_num {skipped} (not in {ens_name})')
+        if not models:
             continue
+        # Explicit target states: target_state=-1 appends after
+        # count_states(name), which PyMOL resolves by name prefix, so a new
+        # ens_cluster_1 would start after the states of ens_cluster_13.
+        for state, model in enumerate(models, start=1):
+            cmd.create(name, ens_name, source_state=model, target_state=state)
+        if str(all_states) not in ('0', 'false', 'False'):
+            cmd.set('all_states', 1, name)
+        cluster_dict[name] = models
 
-        cluster_name = f'{ens_name}_cluster_{int(cluster_id)}'
-        cmd.delete(cluster_name)
-        cluster_models = df[df['cluster_id'] == cluster_id]['model_num'].tolist()
-
-        cluster_dict[cluster_name] = cluster_models
-        for model in cluster_models:
-            cmd.create(cluster_name,
-                       ens_name,
-                       source_state=int(model),
-                       target_state=-1)
-            
     cmd.group(f'{ens_name}_clusters', ' '.join(cluster_dict))
 
     print('Cluster: Models')
