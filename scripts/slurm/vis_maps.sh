@@ -17,7 +17,7 @@
 # Thin pass-through: every argument after the script name is
 # forwarded verbatim to vis_maps.py, so the full Python CLI is
 # available without maintaining a parallel copy of each flag.
-# See `vis_maps.py --help`. The manifest format (JSON or YAML) is
+# See `vis_maps.py --help`. The manifest format (JSON, YAML or CSV) is
 # handled by vis_maps.py itself, so no change is needed here.
 #
 # Note: headless ray-tracing (--render) needs OSMesa/libGL on the
@@ -25,10 +25,12 @@
 # interactive rendering; omit --render if the node lacks GL.
 #
 # Examples:
-#   sbatch vis_maps.sh maps/map_manifest.json --receptor 1o7v_receptor.pdb \
-#       --tag boltzmann_b0p5 --contour-mode components --hotspots -o 1o7v_vis
+#   sbatch vis_maps.sh maps/1o7v_global_1000p_boltzmann_map_manifest.json \
+#       --receptor 1o7v_receptor.pdb --tag boltzmann_b0p5 \
+#       --contour-mode components --hotspots -o 1o7v_vis
 #
-#   sbatch vis_maps.sh maps/map_manifest.yaml --receptor 1o7v_receptor.pdb
+#   sbatch vis_maps.sh maps/1o7v_global_1000p_boltzmann_map_manifest.csv \
+#       --receptor 1o7v_receptor.pdb
 # ============================================================ #
 
 CONDA_PATH="${CONDA_PATH:-}"
