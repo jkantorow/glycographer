@@ -23,12 +23,15 @@ The mapping stack is built around three ideas:
 
 import os
 import json
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Tuple, Dict, List, Optional
 
 import MDAnalysis as mda
 import numpy as np
 import pandas as pd
+
+from glycographer import naming
 
 if TYPE_CHECKING:
     from glycographer.dock import GlycanDockEnsemble
@@ -118,6 +121,52 @@ class GridSpec:
         return cls.from_bounds(min_c, max_c, voxel_size=voxel_size,
                                padding=padding)
 
+    @classmethod
+    def from_reference(cls, path):
+        '''
+        Reuse the grid (origin, shape, voxel size) of earlier maps, so new
+        maps are voxel-for-voxel aligned with them -- e.g. to add probes to a
+        set mapped earlier without remapping that set.
+
+        `path` is a map manifest (.json/.yaml with a 'grid' entry, as written
+        by map_ensembles.py) or a .dx map. Prefer the manifest: it stores the
+        origin at full precision, whereas .dx files written before Nov 2026
+        round it to 6 decimals, which re-bins atoms lying exactly on a cell
+        boundary (~0.1-0.3% of occupied voxels change).
+        '''
+        if str(path).lower().endswith('.dx'):
+            vm = VolMap.from_dx(path)
+            return cls(origin=vm.origin, shape=vm.shape, voxel_size=vm.voxel_size)
+        with open(path) as f:
+            if str(path).lower().endswith(('.yaml', '.yml')):
+                import yaml
+                grid = yaml.safe_load(f)['grid']
+            else:
+                grid = json.load(f)['grid']
+        return cls(origin=grid['origin'], shape=grid['shape'],
+                   voxel_size=grid.get('voxel_size', 1.0))
+
+    def expanded_to_cover(self, ensembles, padding=0.0):
+        '''
+        This grid grown by whole voxels until it encloses every heavy ligand
+        atom of `ensembles` (plus `padding`). Growing by whole voxels keeps
+        the lattice: every voxel of the original grid is still a voxel of the
+        new one, at the same position, so maps on the two grids agree exactly
+        wherever they overlap (crop the larger to compare voxelwise).
+        '''
+        lo = np.full(3, np.inf)
+        hi = np.full(3, -np.inf)
+        for ens in ensembles:
+            a, b = self._coord_bounds_universe(ens.universe)
+            lo, hi = np.minimum(lo, a - padding), np.maximum(hi, b + padding)
+        v = self.voxel_size
+        upper = self.origin + np.asarray(self.shape) * v
+        grow_lo = np.maximum(0, np.ceil((self.origin - lo) / v)).astype(int)
+        grow_hi = np.maximum(0, np.ceil((hi - upper) / v + 1e-9)).astype(int)
+        return GridSpec(origin=self.origin - grow_lo * v,
+                        shape=np.asarray(self.shape) + grow_lo + grow_hi,
+                        voxel_size=v)
+
     @staticmethod
     def _coord_bounds(pdb_file, selection='not name *H*'):
         '''Min/max heavy-atom coordinates over all frames of a (multi-model) file.'''
@@ -146,7 +195,14 @@ class GridSpec:
         return [[v, 0, 0], [0, v, 0], [0, 0, v]]
 
     def cell_indices(self, coords):
-        '''Integer (i, j, k) cell index for each coordinate in (N, 3) coords.'''
+        '''
+        Integer (i, j, k) cell index for each coordinate in (N, 3) coords.
+
+        Atoms often sit exactly on a cell boundary (PDB coordinates and grid
+        origins both carry 3 decimals), and which side they fall on depends
+        on the origin's last bits. Reusing a grid therefore needs its origin
+        at full precision -- see from_reference().
+        '''
         return np.floor((np.asarray(coords, dtype=float) - self.origin)
                         / self.voxel_size).astype(np.int64)
 
@@ -342,11 +398,19 @@ class Mapper:
 @dataclass
 class IntEngMinMapper(Mapper):
     '''
+    DEPRECATED: use BoltzmannMapper with a large beta (e.g. beta=10), which
+    converges to this map as beta -> infinity without being dominated by a
+    single outlier pose. Kept only so old notebooks still run; no longer
+    offered by map_ensembles.py.
+
     Voxel value = minimum favorable (negative) whole-pose interaction energy of
-    any pose occupying the voxel. Outlier-sensitive; kept for compatibility and
-    as the beta -> infinity limit of the Boltzmann mapper.
+    any pose occupying the voxel.
     '''
     def __post_init__(self):
+        warnings.warn(
+            'IntEngMinMapper is deprecated; use BoltzmannMapper with a large '
+            'beta (e.g. beta=10), its beta -> infinity limit.',
+            FutureWarning, stacklevel=3)
         self._map_type = 'intengmin'
         self._score_column = 'interaction_energy'
 
@@ -502,10 +566,26 @@ class ResidueBoltzmannMapper(BoltzmannMapper):
 # ---------------------------------------------------------------------------
 # VolMap: read / store / write voxel grids
 # ---------------------------------------------------------------------------
+# Identity fields recorded as '# <key> <value>' comment lines in the .dx
+# header, so a map file describes itself without its JSON sidecar.
+_DX_HEADER_KEYS = ('map_id', 'map_type', 'beta', 'ensemble_id', 'n_poses')
+
+
 @dataclass
 class VolMap:
     '''
     Object for reading, storing, and writing voxel grid data.
+
+    Identity
+    --------
+    map_id       standard name, <ensemble_id>_<map_type>[_b<beta>]
+                 (see glycographer.naming); also the default file stem.
+    map_type     mapper that produced the values ('boltzmann', ...).
+    beta         Boltzmann beta, or None for map types without one.
+    ensemble_id  <run_id>_<n_poses>p of the source ensemble.
+    n_poses      number of poses mapped.
+    dx_path      absolute path of the .dx this map was read from or last
+                 written to (None until then).
     '''
     map_id: str = None
     map_type: str = None
@@ -515,29 +595,38 @@ class VolMap:
     origin: Tuple = None
     values: np.ndarray = None
     ensemble: 'GlycanDockEnsemble' = None
+    beta: Optional[float] = None
+    ensemble_id: str = None
+    n_poses: Optional[int] = None
+    dx_path: str = None
 
     _values_3d: np.ndarray = field(default=None, init=False)
-    _dx_file: str = field(default=None, init=False)
-    _dx_path: str = field(default=None, init=False)
+
+    @property
+    def voxel_size(self):
+        s = self.spacing[0]
+        return float(s[0] if isinstance(s, (list, tuple, np.ndarray)) else s)
+
+    @property
+    def run_id(self):
+        return naming.normalize_run_id(self.ensemble_id) if self.ensemble_id else None
 
     @classmethod
     def from_dx(cls, dx_file: str):
         '''
         Construct the VolMap data object from an input dx file.
+
+        Identity fields come from the '# key value' header lines written by
+        to_dx(); for older files without them they are parsed from the
+        filename where it follows the standard naming pattern.
         '''
-        # Cache the filepath:
-        _dx_path = os.path.abspath(dx_file)
-
-        # Define map name from dx file:
-        map_id = os.path.basename(dx_file.replace('.dx', ''))
-
         with open(dx_file, 'r') as f:
             lines = f.readlines()
 
         values = []
         spacing = []
+        header = {}
         data_started = False
-        map_type = None
         shape = None
         origin = None
 
@@ -547,8 +636,9 @@ class VolMap:
                 continue
             if line.startswith('#'):
                 fields = line.split()
-                if len(fields) >= 3 and fields[1] == 'map_type':
-                    map_type = fields[2]
+                if len(fields) >= 3 and fields[1] in _DX_HEADER_KEYS:
+                    header[fields[1]] = fields[2]
+                continue
             if line.startswith('object 1 class gridpositions counts'):
                 fields = line.split()
                 shape = [int(fields[5]), int(fields[6]), int(fields[7])]
@@ -584,20 +674,27 @@ class VolMap:
                 values = values[:expected_length]
 
         values = np.asarray(values, dtype=float)
-        _values_3d = values.reshape(shape)
+
+        # Header first; fall back to the standard filename pattern.
+        stem = os.path.splitext(os.path.basename(dx_file))[0]
+        parsed = naming.parse_map_id(header.get('map_id', stem))
+        beta = header.get('beta', parsed.get('beta'))
+        n_poses = header.get('n_poses', parsed.get('n_poses'))
 
         volmap = cls.__new__(cls)
-        volmap.map_id = map_id
-        volmap.map_type = map_type
+        volmap.map_id = header.get('map_id', stem)
+        volmap.map_type = header.get('map_type', parsed.get('map_type'))
+        volmap.beta = None if beta in (None, 'None') else float(beta)
+        volmap.ensemble_id = header.get('ensemble_id', parsed.get('ensemble_id'))
+        volmap.n_poses = None if n_poses in (None, 'None') else int(n_poses)
         volmap.coords = None
         volmap.spacing = spacing
         volmap.shape = shape
         volmap.origin = np.asarray(origin, dtype=float)
         volmap.values = values
         volmap.ensemble = None
-        volmap._values_3d = _values_3d
-        volmap._dx_file = dx_file
-        volmap._dx_path = _dx_path
+        volmap._values_3d = values.reshape(shape)
+        volmap.dx_path = os.path.abspath(dx_file)
 
         return volmap
 
@@ -607,19 +704,27 @@ class VolMap:
         Construct a VolMap object from data calculated by and stored within
         a Mapper object.
         '''
+        ens = mapper.ensemble
+        n_poses = ens._n_poses or len(mapper._universe.trajectory)
+        ens_id = naming.ensemble_id(ens.run_id or 'glycandock', n_poses)
+        beta = getattr(mapper, 'beta', None)
         return cls.from_values(
             values=mapper._volmap_values,
             shape=mapper._volmap_shape,
             origin=mapper._volmap_origin,
             voxel_size=mapper.voxel_size,
-            map_id=f'{mapper.ensemble.run_id}_{mapper._map_type}',
+            map_id=naming.map_id(ens_id, mapper._map_type, beta),
             map_type=mapper._map_type,
-            ensemble=mapper.ensemble,
+            ensemble=ens,
+            beta=beta,
+            ensemble_id=ens_id,
+            n_poses=n_poses,
         )
 
     @classmethod
     def from_values(cls, values, shape, origin, voxel_size, map_id,
-                    map_type, ensemble=None):
+                    map_type, ensemble=None, beta=None, ensemble_id=None,
+                    n_poses=None):
         '''Construct a VolMap directly from a flat value array + grid geometry.'''
         spacing = [[voxel_size, 0, 0],
                    [0, voxel_size, 0],
@@ -629,6 +734,9 @@ class VolMap:
         volmap = cls.__new__(cls)
         volmap.map_id = map_id
         volmap.map_type = map_type
+        volmap.beta = None if beta is None else float(beta)
+        volmap.ensemble_id = ensemble_id
+        volmap.n_poses = None if n_poses is None else int(n_poses)
         volmap.coords = None
         volmap.spacing = spacing
         volmap.shape = list(shape)
@@ -636,8 +744,7 @@ class VolMap:
         volmap.values = values
         volmap.ensemble = ensemble
         volmap._values_3d = values.reshape(tuple(shape))
-        volmap._dx_file = None
-        volmap._dx_path = None
+        volmap.dx_path = None
         return volmap
 
     def to_dx(self, filename=None, n_cols=3):
@@ -647,7 +754,7 @@ class VolMap:
         Parameters:
         -----------
         filename : str, optional
-            Output filename. If None, uses map name
+            Output filename. Defaults to '<map_id>.dx'.
 
         n_cols : int
             Number of values per line in output file
@@ -674,10 +781,15 @@ class VolMap:
             dx = dy = dz = self.spacing[0] if self.spacing else 1.0
 
         with open(filename, 'w') as f:
-            # Header with metadata (need to add more detail)
-            f.write(f'# map_type {self.map_type}\n')
+            # Self-describing header (comment lines; ignored by PyMOL/VMD).
+            f.write('# glycographer volumetric map\n')
+            for key in _DX_HEADER_KEYS:
+                val = getattr(self, key)
+                if val is not None:
+                    f.write(f'# {key} {val}\n')
             f.write(f'object 1 class gridpositions counts {nx} {ny} {nz}\n')
-            f.write(f'origin {self.origin[0]:.6f} {self.origin[1]:.6f} {self.origin[2]:.6f}\n')
+            # Full precision, so the grid can be reused exactly (from_reference).
+            f.write('origin ' + ' '.join(repr(float(x)) for x in self.origin) + '\n')
             f.write(f'delta {dx:.6f} 0.000000 0.000000\n')
             f.write(f'delta 0.000000 {dy:.6f} 0.000000\n')
             f.write(f'delta 0.000000 0.000000 {dz:.6f}\n')
@@ -698,35 +810,94 @@ class VolMap:
             f.write('attribute "dep" string "positions"\n')
             f.write('object "density" class field\n')
 
-        # Cache the file data:
-        self._dx_file = filename
-        self._dx_path = os.path.abspath(filename)
-
-        print(f'Wrote {self.map_type} type map in OpenDX format to {self._dx_path}')
+        self.dx_path = os.path.abspath(filename)
+        print(f'Wrote {self.map_type} type map in OpenDX format to {self.dx_path}')
 
         return filename
 
-    def to_json(self, filename=None):
-        '''Export map metadata to JSON.'''
-        if filename is None:
-            filename = f'{self.map_id}_metadata.json'
+    def metadata(self):
+        '''
+        Flat record describing this map: identity (map_id, run_id, receptor,
+        ligand, grid_id, ensemble_id, n_poses, map_type, beta), file
+        (dx_path), grid geometry, and value statistics over occupied voxels
+        (analysis.map_stats) plus the count of favorable (< 0) voxels.
+        '''
+        from glycographer.analysis import map_stats
 
-        metadata = {
+        ident = naming.parse_run_id(self.run_id) if self.run_id else {
+            'run_id': None, 'receptor': None, 'ligand': None, 'grid_id': None}
+        stats = map_stats(self)
+        return {
             'map_id': self.map_id,
+            **ident,
+            'ensemble_id': self.ensemble_id,
+            'n_poses': self.n_poses,
             'map_type': self.map_type,
+            'beta': self.beta,
+            'dx_path': self.dx_path,
             'origin': self.origin.tolist() if self.origin is not None else None,
-            'shape': self.shape,
-            'spacing': self.spacing,
-            'dx_file': self._dx_file,
-            'dx_path': self._dx_path
+            'shape': list(self.shape),
+            'voxel_size': self.voxel_size,
+            'n_voxels': stats['n_voxels'],
+            'n_occupied': stats['n_occupied'],
+            'n_favorable': int(np.count_nonzero(np.asarray(self.values) < 0)),
+            'min_value': stats['min'],
+            'max_value': stats['max'],
+            'mean_value': stats['mean'],
+            'std_value': stats['std'],
         }
 
+    def to_json(self, filename=None):
+        '''
+        Export map metadata (see metadata()) to JSON. Defaults to
+        '<map_id>.json', next to the .dx when one has been written.
+        '''
+        if filename is None:
+            base = (os.path.splitext(self.dx_path)[0] if self.dx_path
+                    else self.map_id)
+            filename = f'{base}.json'
+
         with open(filename, 'w') as f:
-            json.dump(metadata, f, indent=2)
+            json.dump(self.metadata(), f, indent=2)
 
         print(f'Wrote JSON metadata to {os.path.abspath(filename)}')
 
         return filename
+
+
+def load_map_manifests(source):
+    '''
+    Concatenate map manifest tables (the *_map_manifest.csv files written by
+    map_ensembles.py) into one DataFrame, e.g. to compare maps across
+    ensemble sizes and betas, or to see which maps already exist.
+
+    Parameters
+    ----------
+    source : str or list of str
+        A directory (searched recursively for '*_map_manifest.csv'), a glob
+        pattern, or a list of CSV paths.
+
+    Returns
+    -------
+    pd.DataFrame with one row per map; when the same map_id appears in more
+    than one manifest, the most recently modified manifest wins. A 'manifest'
+    column records the source file.
+    '''
+    import glob as _glob
+    if isinstance(source, str):
+        if os.path.isdir(source):
+            paths = _glob.glob(os.path.join(source, '**', '*_map_manifest.csv'),
+                               recursive=True)
+        else:
+            paths = _glob.glob(source)
+    else:
+        paths = list(source)
+    if not paths:
+        raise FileNotFoundError(f'No map manifest CSVs found from {source!r}.')
+    paths.sort(key=os.path.getmtime)
+    frames = [pd.read_csv(p).assign(manifest=os.path.abspath(p)) for p in paths]
+    df = pd.concat(frames, ignore_index=True)
+    return df.drop_duplicates(subset='map_id', keep='last').reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -744,7 +915,7 @@ class ConsensusMap:
     "this probe did not visit here" (NaN) so they don't dilute the consensus.
 
     Intended for REU-scale maps where favorable = negative (BoltzmannMapper /
-    ResidueBoltzmannMapper / IntEngMinMapper). Mixing in the [0, 1]
+    ResidueBoltzmannMapper). Mixing in the [0, 1]
     IntEngAvgMapper convention will give meaningless results.
     '''
     maps: List[VolMap]
@@ -783,7 +954,8 @@ class ConsensusMap:
         return VolMap.from_values(
             values=np.nan_to_num(values, nan=0.0),
             shape=ref.shape, origin=ref.origin, voxel_size=v,
-            map_id=f'consensus_{tag}', map_type=f'consensus_{tag}')
+            map_id=f'consensus_{tag}', map_type=f'consensus_{tag}',
+            beta=ref.beta)
 
     def _standardized(self, method='percentile'):
         '''
