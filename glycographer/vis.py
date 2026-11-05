@@ -423,7 +423,8 @@ def draw_probe_shells(map_source, probe_labels=None, n=3, mode='absolute',
     ----------
     map_source : str or list of str
         The per-probe .dx maps (favorable = negative). Accepts, in order:
-          * a directory  -- every '*.dx' in it except 'consensus_*' maps;
+          * a directory  -- every '*.dx' in it except consensus maps
+            (any with 'consensus' in the filename);
           * a glob pattern ('maps/*_boltzmann_b0p5.dx');
           * a list of paths (script/notebook use).
         From the PyMOL command line a string is required (PyMOL cannot pass a
@@ -456,7 +457,7 @@ def draw_probe_shells(map_source, probe_labels=None, n=3, mode='absolute',
         else:
             paths = sorted(glob.glob(map_source))
         paths = [p for p in paths
-                 if not os.path.basename(p).startswith('consensus')]
+                 if 'consensus' not in os.path.basename(p)]
     else:
         paths = list(map_source)
     if not paths:
