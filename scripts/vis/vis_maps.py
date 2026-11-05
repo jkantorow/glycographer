@@ -23,11 +23,11 @@ receptor) attributed to its lining residues; the tables are written as CSVs.
 
 Examples
 --------
-  # Best_probe surface + per-probe contour overlay, saved to a .pse:
-  vis_maps.py maps/map_manifest.json --receptor 1o7v_receptor.pdb -o 1o7v_vis
+  # Per-probe contour overlay (+ consensus surface if present), saved to a .pse:
+  vis_maps.py maps/1o7v_global_1000p_boltzmann_map_manifest.json       --receptor 1o7v_rec.pdb -o 1o7v_vis
 
   # Pick a tag, use the anti-bleed contour levels, write hotspot tables, render:
-  vis_maps.py maps/map_manifest.json --receptor rec.pdb --tag boltzmann_b0p5 \
+  vis_maps.py maps/1o7v_global_1000p_boltzmann_map_manifest.csv       --receptor 1o7v_rec.pdb --tag boltzmann_b0p5 \
       --contour-mode components --hotspots --render -o 1o7v_vis
 '''
 
@@ -65,12 +65,30 @@ from glycographer.vis import (
 SURFACE_PREFERENCE = ['best_probe', 'min', 'mean', 'support', 'selectivity']
 
 
+def _normalize_entry(m):
+    '''
+    Map a manifest entry onto the current keys (map_tag, ensemble_id,
+    dx_path), accepting manifests written before the naming cleanup
+    (tag, ensemble, dx).
+    '''
+    m = dict(m)
+    m.setdefault('map_tag', m.get('tag'))
+    m.setdefault('ensemble_id', m.get('ensemble'))
+    m.setdefault('dx_path', m.get('dx'))
+    return m
+
+
 def load_manifest(path):
     '''
-    Read the map manifest into (grid, maps, consensus). Supports both JSON and
-    YAML (matching map_ensembles.py's config handling); the format is chosen by
-    file extension, defaulting to JSON.
+    Read the map manifest into (grid, maps, consensus). Accepts the JSON or
+    YAML manifest, or the CSV table (maps only, no consensus), chosen by file
+    extension.
     '''
+    if path.endswith('.csv'):
+        import csv
+        with open(path, newline='') as f:
+            maps = list(csv.DictReader(f))
+        return {}, [_normalize_entry(m) for m in maps], []
     with open(path) as f:
         if path.endswith(('.yaml', '.yml')):
             import yaml
@@ -78,16 +96,16 @@ def load_manifest(path):
         else:
             data = json.load(f)
     return (data.get('grid', {}),
-            data.get('maps', []),
-            data.get('consensus', []))
+            [_normalize_entry(m) for m in data.get('maps', [])],
+            [_normalize_entry(c) for c in data.get('consensus', [])])
 
 
 def tags_in(maps):
     '''Ordered unique map tags present in the manifest maps list.'''
     seen = []
     for m in maps:
-        if m['tag'] not in seen:
-            seen.append(m['tag'])
+        if m['map_tag'] not in seen:
+            seen.append(m['map_tag'])
     return seen
 
 
@@ -97,7 +115,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
     parser.add_argument('manifest',
-                        help='Map manifest (JSON or YAML) written by '
+                        help='Map manifest (JSON, YAML or CSV) written by '
                              'map_ensembles.py; format chosen by extension.')
     parser.add_argument('-rec', '--receptor', required=True,
                         help='Receptor PDB the maps were built around.')
@@ -164,8 +182,8 @@ def main():
         print(f'Multiple tags present {all_tags}; visualizing {tag!r}. '
               'Pass --tag to choose another.')
 
-    probe_maps = [m for m in maps if m['tag'] == tag]
-    probe_labels = [m['ensemble'] for m in probe_maps]
+    probe_maps = [m for m in maps if m['map_tag'] == tag]
+    probe_labels = [m['ensemble_id'] for m in probe_maps]
     palette = probe_palette(probe_labels)
 
     pymol.finish_launching(['pymol', '-cq'])
@@ -180,8 +198,8 @@ def main():
 
     # ---- Per-probe contour meshes (colored per probe) -------------------
     for m in probe_maps:
-        label = m['ensemble']
-        dx = m['dx']
+        label = m['ensemble_id']
+        dx = m['dx_path']
         if not os.path.isfile(dx):
             print(f'Warning: {label} map missing on disk ({dx}); skipping.')
             continue
@@ -196,7 +214,7 @@ def main():
                       for k, v in palette.items()))
 
     # ---- Consensus surface ----------------------------------------------
-    cons_for_tag = [c for c in consensus if c.get('tag') == tag]
+    cons_for_tag = [c for c in consensus if c.get('map_tag') == tag]
     surf = args.surface
     if surf is None:
         available = {c['reduction'] for c in cons_for_tag}
@@ -207,32 +225,33 @@ def main():
         if entry is None:
             print(f'No consensus "{surf}" map for tag {tag!r}; skipping surface. '
                   f'(Available: {[c["reduction"] for c in cons_for_tag]})')
-        elif not os.path.isfile(entry['dx']):
+        elif not os.path.isfile(entry['dx_path']):
             print(f'Consensus "{surf}" map missing on disk; skipping surface.')
         else:
-            surf_map = load_volmap_from_dx(entry['dx'])
+            surf_map = load_volmap_from_dx(entry['dx_path'])
             if surf == 'best_probe':
                 draw_best_probe_surface(rec_name, surf_map, entry['probes'])
                 print(f'best_probe surface; probe index order: {entry["probes"]}')
             else:
-                draw_mapped_surface(rec_name, surf_map, map_dx=entry['dx'])
+                draw_mapped_surface(rec_name, surf_map, map_dx=entry['dx_path'])
                 print(f'consensus "{surf}" surface on {rec_name}.')
 
     # ---- Hotspot / attribution tables -----------------------------------
     if args.hotspots:
         for m in probe_maps:
-            label, dx = m['ensemble'], m['dx']
+            label, dx = m['ensemble_id'], m['dx_path']
             if not os.path.isfile(dx):
                 continue
+            stem = m.get('map_id') or f'{label}_{tag}'
             vm = VolMap.from_dx(dx)
             hs = find_hotspots(vm, min_voxels=args.min_voxels,
                                smooth_sigma=args.smooth)
-            hs_path = os.path.join(args.outdir, f'{label}_{tag}_hotspots.csv')
+            hs_path = os.path.join(args.outdir, f'{stem}_hotspots.csv')
             hs.to_csv(hs_path, index=False)
             att = attribute_hotspots_to_residues(
                 vm, args.receptor, min_voxels=args.min_voxels,
                 radius=args.radius, smooth_sigma=args.smooth)
-            att_path = os.path.join(args.outdir, f'{label}_{tag}_lining.csv')
+            att_path = os.path.join(args.outdir, f'{stem}_lining.csv')
             att.to_csv(att_path, index=False)
             print(f'[{label}] {len(hs)} hotspots -> {hs_path}; '
                   f'lining residues -> {att_path}')
