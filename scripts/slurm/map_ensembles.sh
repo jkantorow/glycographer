@@ -20,10 +20,11 @@
 # copy of each flag here. See `map_ensembles.py --help`.
 #
 # Examples:
-#   # Same boltzmann map (beta sweep) for three probes + consensus:
-#   sbatch map_ensembles.sh runs/diSia runs/LacNAc runs/Man3 \
-#       --grid-pdb 1o7v_receptor.pdb --beta 0.3 0.5 1.0 \
-#       --outdir maps --consensus mean best_probe support
+#   # Boltzmann beta sweep for three probes (archives or pose dirs):
+#   sbatch map_ensembles.sh runs/1o7v-gal_global.tar.xz \
+#       runs/1o7v-nag_global.tar.xz runs/1o7v-sia_global/ \
+#       --grid-pdb 1o7v_receptor.pdb --beta 0.3 0.5 1.0 1.62 \
+#       -range 1 1000 --outdir maps
 #
 #   # Heterogeneous per-ensemble parameters via a job spec:
 #   sbatch map_ensembles.sh --config jobs.json
