@@ -72,8 +72,8 @@ Color the receptor surface by a *single* continuous map — a per-probe map, or 
 `consensus_min` / `consensus_mean` field. Load the map, then ramp:
 
 ```
-load_volmap_from_dx  maps/consensus_boltzmann_b0p5_min.dx      # -> object "consensus_boltzmann_b0p5_min"
-draw_mapped_surface  1o7v_receptor, consensus_boltzmann_b0p5_min, map_dx=maps/consensus_boltzmann_b0p5_min.dx
+load_volmap_from_dx  maps/1o7v_global_1000p_boltzmann_b0p5_consensus_min.dx      # -> object "1o7v_global_1000p_boltzmann_b0p5_consensus_min"
+draw_mapped_surface  1o7v_receptor, 1o7v_global_1000p_boltzmann_b0p5_consensus_min, map_dx=maps/1o7v_global_1000p_boltzmann_b0p5_consensus_min.dx
 ```
 
 `map_dx=` lets it auto-derive the ramp bounds `[map_min, 0]`; alternatively set
@@ -124,16 +124,30 @@ so the maps are index-aligned and consensus maps can be built in the same pass.
 PY=/c/Users/computer7/miniconda3/envs/glycographer/python.exe
 
 $PY scripts/utils/map_ensembles.py \
-    runs/1o7v-Man runs/1o7v-Glc runs/1o7v-Gal runs/1o7v-Fuc runs/1o7v-Sia runs/1o7v-Xyl \
+    runs/1o7v-man_global.tar.xz runs/1o7v-gal_global.tar.xz runs/1o7v-sia_global/ \
     --grid-pdb 1o7v_receptor.pdb \
-    --map-type boltzmann --beta 0.5 \
+    --map-type boltzmann --beta 0.5 -range 1 1000 \
     --outdir maps \
     --consensus mean best_probe support
 ```
 
-Writes `maps/<probe>_boltzmann_b0p5.dx` for each probe, `maps/consensus_*.dx`,
-and **`maps/map_manifest.json`** (grid geometry + every map's probe/tag/path +
-consensus entries). For heterogeneous per-probe parameters use `--config
+Each source can be a merged archive, a directory of block archives, or a
+directory of loose PDBs. Names follow `glycographer/naming.py`:
+
+- `maps/<receptor>-<ligand>_<grid>_<N>p_boltzmann_b0p5.dx` (+ a `.json`
+  metadata sidecar) per probe, e.g. `1o7v-gal_global_1000p_boltzmann_b0p5.dx`;
+  `<N>` is the number of poses actually mapped.
+- `maps/<...>_ensemble.pdb` and `<...>_scores.csv` per ensemble.
+- `maps/<manifest_id>_map_manifest.json` (grid geometry, ensembles, every
+  map's identity/paths/statistics, consensus entries) **and** a matching
+  `.csv` table with one row per map. `manifest_id` is built from the fields
+  all maps share (here `1o7v_global_1000p_boltzmann_b0p5`) or set with
+  `--manifest-id`.
+- Consensus maps (on hiatus) as `<manifest_id>_consensus_<reduction>.dx`.
+
+Combine CSV manifests from many runs with
+`glycographer.map.load_map_manifests('maps/')` to compare maps across ensemble
+sizes and betas. For heterogeneous per-probe parameters use `--config
 jobs.json`; see `map_ensembles.py --help`.
 
 ### Step 2 — build the visualization (`vis_maps.py`)
@@ -142,7 +156,7 @@ Point it at the manifest and the receptor. The default scene is **per-probe
 contour cages + a consensus surface**:
 
 ```
-$PY scripts/vis/vis_maps.py  maps/map_manifest.json \
+$PY scripts/vis/vis_maps.py  maps/1o7v_global_1000p_boltzmann_b0p5_map_manifest.json \
     --receptor 1o7v_receptor.pdb \
     --tag boltzmann_b0p5 \
     --contour-mode components \
@@ -154,7 +168,7 @@ $PY scripts/vis/vis_maps.py  maps/map_manifest.json \
 Produces:
 - `vis/1o7v_vis.pse` — receptor + per-probe contours (colorblind-safe palette) +
   the best_probe surface.
-- with `--hotspots`: `vis/<probe>_boltzmann_b0p5_hotspots.csv` and
+- with `--hotspots`: `vis/<map_id>_hotspots.csv` and
   `..._lining.csv` per probe — the ranked hotspots and their lining residues.
 
 Notes:
@@ -163,7 +177,8 @@ Notes:
 - `--surface` accepts `best_probe`, `min`, `mean`, `support`, `selectivity`, or
   `none`; it is skipped gracefully if that consensus map is absent.
 - `--render` also ray-traces a PNG (needs OSMesa/libGL when headless).
-- The manifest may be JSON or YAML (chosen by extension).
+- The manifest may be JSON, YAML or the CSV table (chosen by extension);
+  manifests written before the naming cleanup still load.
 
 ### On the cluster (SLURM)
 
@@ -172,10 +187,10 @@ straight to the Python CLI:
 
 ```
 sbatch scripts/slurm/map_ensembles.sh \
-    runs/1o7v-Man runs/1o7v-Glc runs/1o7v-Gal runs/1o7v-Fuc runs/1o7v-Sia runs/1o7v-Xyl \
-    --grid-pdb 1o7v_receptor.pdb --beta 0.5 --outdir maps --consensus mean best_probe support
+    runs/1o7v-man_global.tar.xz runs/1o7v-gal_global.tar.xz runs/1o7v-sia_global/ \
+    --grid-pdb 1o7v_receptor.pdb --beta 0.5 -range 1 1000 --outdir maps
 
-sbatch scripts/slurm/vis_maps.sh  maps/map_manifest.json \
+sbatch scripts/slurm/vis_maps.sh  maps/1o7v_global_1000p_boltzmann_b0p5_map_manifest.json \
     --receptor 1o7v_receptor.pdb --tag boltzmann_b0p5 --contour-mode components --hotspots -o 1o7v_vis
 ```
 
