@@ -85,11 +85,12 @@ def _coerce(field_type, raw: str, key: str):
             f'{key}: cannot read {raw!r} as {field_type.__name__}: {e}')
 
 # --- option file locations -------------------------------------------------
-# config/ currently lives at the repo root, beside the package. Under the
-# editable install this resolves to the live source tree; see the note in
-# pyproject.toml about eventually moving it inside the package.
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_DIR = os.path.join(_REPO_ROOT, 'config')
+# CONFIG_DIR and the Rosetta session helpers live in utils.py (shared with
+# model.py); re-exported here so existing `from glycographer.sample import
+# init_rosetta` style imports keep working.
+from glycographer.utils import (  # noqa: E402,F401
+    CONFIG_DIR, init_rosetta, read_option_flags, seed_flags as _seed_flags,
+)
 
 STAGE_0_OPTIONS = os.path.join(CONFIG_DIR, 'glycandock_stage_0.init')
 STAGE_1_2_OPTIONS = os.path.join(CONFIG_DIR, 'glycandock_stage_1_stage_2.init')
@@ -494,38 +495,6 @@ def block_slice(total: int, n_blocks: int, block_index: int,
     return list(range(start + offset, start + offset + size))
 
 
-def _seed_flags(seed: Optional[int]) -> str:
-    '''
-    Rosetta flags pinning the RNG seed.
-
-    `-run:jran` only takes effect together with `-run:constant_seed`; without
-    it Rosetta derives a seed from the system clock / urandom and ignores jran.
-
-    VERIFY ONCE ON THE CLUSTER: run the same block twice with the same seed and
-    confirm the decoys are identical, then run two blocks with different seeds
-    and confirm they differ. Silent seed collisions across array tasks would
-    duplicate decoys without raising anything, and would not be obvious in the
-    output -- an energy map built from duplicated samples just looks sharper
-    than it should.
-
-    Pass seed=None to fall back to Rosetta's default non-deterministic seeding.
-    '''
-    if seed is None:
-        return ''
-    return f'-run:constant_seed -run:jran {int(seed)}'
-
-
-def read_option_flags(options_file: str) -> set:
-    '''Flag names (the leading -token of each line) declared in a Rosetta options file.'''
-    flags = set()
-    with open(options_file) as f:
-        for line in f:
-            line = line.split('#', 1)[0].strip()
-            if line.startswith('-'):
-                flags.add(line.split()[0])
-    return flags
-
-
 def check_options(options_file: str, config: GlycanDockConfig) -> List[str]:
     '''
     Preflight the options file against the config, returning human-readable
@@ -577,76 +546,6 @@ def check_options(options_file: str, config: GlycanDockConfig) -> List[str]:
             f'glycan residues will not be typed as carbohydrates.')
 
     return problems
-
-
-def init_rosetta(options_file: str, complex_pdb: Optional[str] = None, *,
-                 native: Optional[str] = None,
-                 n_cycles: Optional[int] = None,
-                 cst_file: Optional[str] = None,
-                 seed: Optional[int] = None,
-                 extra_flags: str = '',
-                 mute: bool = False) -> str:
-    '''
-    Start a Rosetta session for one stage of the protocol.
-
-    A process gets exactly one of these. Because prepacking and refinement use
-    different rotamer-sampling flags (-ex3 -ex4 -ex1aro -ex2aro vs -ex1 -ex2),
-    they cannot share a session -- which is why `prepack_mode='once'` requires a
-    separate job rather than a separate function call.
-
-    Parameters
-    ----------
-    options_file : str
-        Rosetta flags file -- one of STAGE_0_OPTIONS, STAGE_1_2_OPTIONS,
-        STAGE_2_OPTIONS, or a caller-supplied path.
-    complex_pdb : str, optional
-        Passed as -in:file:s. Redundant with an explicit pose_from_pdb() call,
-        but some option-system defaults key off it, and it records the input in
-        the Rosetta log.
-    native : str, optional
-        Reference complex for RMSD/Fnat scoring (-in:file:native). Without it
-        Fnat, heavy_Lrmsd, ring_Lrmsd and the other native-relative scores come
-        out as NA.
-    n_cycles : int, optional
-        Stage 2 outer ramping cycles. Applied here rather than on the mover
-        because GlycanDockProtocol exposes no setter for it; see _SETTERS.
-    cst_file : str, optional
-        Constraint file (-cst_fa_file), e.g. AtomPair restraints holding a
-        known glycan in its site during refinement. Not used for probe
-        sampling, where restraining the probe would defeat the scan.
-    seed : int, optional
-        RNG seed; see _seed_flags. Use block_seed() to derive one.
-
-    Returns
-    -------
-    str : the full flag string passed to pyrosetta.init(), for provenance.
-    '''
-    from pyrosetta import init
-
-    flags = []
-    if complex_pdb:
-        flags.append(f'-in:file:s {complex_pdb}')
-    if native:
-        flags.append(f'-in:file:native {native}')
-    if n_cycles is not None:
-        flags.append(f'-n_cycles {int(n_cycles)}')
-    if cst_file:
-        flags.append(f'-cst_fa_file {cst_file}')
-    # -nstruct does NOT control the decoy count here -- the loop below does.
-    # It is supplied because Rosetta's job machinery expects it to be set.
-    flags.append('-nstruct 1')
-    seed_str = _seed_flags(seed)
-    if seed_str:
-        flags.append(seed_str)
-    if mute:
-        flags.append('-mute all')
-    if extra_flags:
-        flags.append(extra_flags)
-    flags.append(f'@{options_file}')
-
-    flag_string = ' '.join(flags)
-    init(flag_string)
-    return flag_string
 
 
 # --- Stage 0 ----------------------------------------------------------------

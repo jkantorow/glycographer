@@ -43,8 +43,9 @@ Currently working on CLI integration and more streamlined usage.
 
 ```bash
 
-# Generate glycan probes and docking grid:
-python scripts/glycomodeler.py <glycan-iupac-string>
+# Generate glycan probes (one sequence, or a file of them) and docking grid:
+python scripts/model_glycan_probes.py '<glycan-iupac-string>' -o probes/
+python scripts/model_glycan_probes.py <probes.iupac> -o probes/
 python scripts/build_gridbox.py <receptor.pdb>
 
 # Concatenate receptor and ligand (or clean up a pre-assembled complex with -c):
@@ -59,3 +60,5 @@ python scripts/energy_map_combined.py -p <output_poses_regex_pattern>
 python scripts/vis/vis_glycomaps.py <map_files_regex_pattern> -rec <receptor.pdb>
 
 ```
+
+Cluster-side steps have a SLURM passthrough of the same name under `scripts/slurm/` (e.g. `sbatch scripts/slurm/model_glycan_probes.sh probes.iupac -o probes/`). See [docs/probe_modeling.md](docs/probe_modeling.md) for probe input format and naming.

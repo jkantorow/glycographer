@@ -1,0 +1,28 @@
+# Rosetta options for de novo free-glycan probe modeling
+# (glycographer.model / scripts/model_glycan_probes.py).
+#
+# Identical to the flags the legacy scripts/glycomodeler.py generated
+# internally, so new probe models stay comparable with the existing ones.
+
+# Score with beta_nov16 during GlycanSampler minimization. NOTE: GlycanDock
+# sampling (glycandock_stage_*.init) does NOT pass -beta, so probes are
+# minimized under a different score function than they are later docked with.
+# Kept for parity with every existing probe model; revisit deliberately (and
+# remodel all probes together) rather than piecemeal.
+-beta
+
+-include_sugars
+-auto_detect_glycan_connections
+-alternate_3_letter_codes pdb_sugar
+-maintain_links
+
+# Write PDB 3-letter codes (NAG, GAL, SIA, ...) and LINK records, so the models
+# read straight back into GlycanDock and so glycographer.model can check the
+# written residue codes against the probe name.
+-write_pdb_link_records
+-write_glycan_pdb_codes
+
+-ignore_unrecognized_res
+-ignore_zero_occupancy false
+-load_PDB_components false
+-no_fconfig
