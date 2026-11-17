@@ -1,13 +1,13 @@
 #!/bin/bash
 
 #SBATCH --job-name=gdock-map
-#SBATCH --partition=short
+#SBATCH --partition=simbiosyslab,short
 #SBATCH --nodes=1
 #SBATCH --tasks-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=02:00:00
-#SBATCH --output=./gdock_map.out
-#SBATCH --error=./gdock_map.err
+#SBATCH --output=./gdock_map_%j.out
+#SBATCH --error=./gdock_map_%j.err
 
 # ============================================================ #
 # Generate volumetric maps (and optional cross-probe consensus
