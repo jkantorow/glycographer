@@ -457,12 +457,16 @@ def draw_probe_shells(map_source, probe_labels=None, n=3, mode='absolute',
     Returns
     -------
     dict {probe_label: [contour object names]}
+        Shells are named shell_<label>_<level>, with the level in REU to 2
+        decimals in naming.fmt_num form (-14.64 -> m14p64); in 'quantile'
+        mode the quantile is appended (shell_<label>_m14p64_q0p001).
     '''
     import glob
     import re
     from glycographer.map import VolMap
     from glycographer.analysis import choose_contour_levels
     from glycographer.colors import probe_palette, rgb_to_hex
+    from glycographer.naming import fmt_num
 
     # Resolve map_source (directory | glob | list) -> list of .dx paths.
     if isinstance(map_source, str):
@@ -499,8 +503,10 @@ def draw_probe_shells(map_source, probe_labels=None, n=3, mode='absolute',
     all_names = {}
     for dx, label in zip(paths, probe_labels):
         volmap = VolMap.from_dx(dx)
-        levels = choose_contour_levels(volmap, n=n, mode=mode, step=step,
-                                       smooth_sigma=smooth_sigma)
+        levels, quants = choose_contour_levels(volmap, n=n, mode=mode,
+                                               step=step,
+                                               smooth_sigma=smooth_sigma,
+                                               return_quantiles=True)
         if not levels:
             print(f'{label}: no favorable (negative) voxels; skipping.')
             continue
@@ -518,14 +524,19 @@ def draw_probe_shells(map_source, probe_labels=None, n=3, mode='absolute',
         # object/color names use its legal form ({} -> _).
         obj_label = _obj_name(label)
         names = []
-        for i, lvl in enumerate(levels):
-            cname = f'shell_{obj_label}_{i}'
+        for lvl, q in zip(levels, quants):
+            # Suffix = level in REU (2 dp) [+ quantile in 'quantile' mode],
+            # filename-safe per naming.fmt_num: -14.64 -> m14p64, 0.005 -> q0p005.
+            suffix = fmt_num(round(lvl, 2))
+            if q is not None:
+                suffix += f'_q{fmt_num(q)}'
+            cname = f'shell_{obj_label}_{suffix}'
             if as_mesh:
                 cmd.isomesh(cname, map_name, float(lvl))
             else:
                 cmd.isosurface(cname, map_name, float(lvl))
             rgb = color_by_magnitude(base, lvl, lvl_range, negative_is_better=True)
-            color_name = f'shellcol_{obj_label}_{i}'
+            color_name = f'shellcol_{obj_label}_{suffix}'
             cmd.set_color(color_name, list(rgb))
             cmd.color(color_name, cname)
             names.append(cname)

@@ -809,7 +809,8 @@ def component_sweep(volmap, levels=None, n_sweep=60, min_voxels=3,
 
 def choose_contour_levels(volmap, n=4, mode='absolute', step=1.0,
                           quantiles=(0.001, 0.005, 0.02, 0.05),
-                          min_gap=0.5, smooth_sigma=None):
+                          min_gap=0.5, smooth_sigma=None,
+                          return_quantiles=False):
     '''
     Choose isocontour levels for a favorable (negative) volume map.
 
@@ -833,17 +834,23 @@ def choose_contour_levels(volmap, n=4, mode='absolute', step=1.0,
     ``min_gap`` drops levels closer than that many REU to the previous kept
     level, preventing nested shells within a voxel. Levels are returned most
     negative (deepest) first.
+
+    With ``return_quantiles=True``, returns ``(levels, qs)`` instead, where
+    ``qs[i]`` is the quantile that produced ``levels[i]`` in 'quantile' mode
+    (after min_gap filtering, so the pairing stays exact) and None otherwise.
     '''
     field = _favorable_field(volmap, smooth_sigma)
     fav = field[field < 0]
     if fav.size == 0:
-        return []
+        return ([], []) if return_quantiles else []
 
     lo = float(fav.min())
+    qs = [None] * n
     if mode == 'absolute':
         raw = lo + np.arange(n) * step
     elif mode == 'quantile':
-        raw = np.quantile(fav, list(quantiles)[:n])
+        qs = [float(q) for q in list(quantiles)[:n]]
+        raw = np.quantile(fav, qs)
     elif mode == 'components':
         levels, counts = component_sweep(volmap, min_voxels=3,
                                          smooth_sigma=smooth_sigma)
@@ -857,14 +864,17 @@ def choose_contour_levels(volmap, n=4, mode='absolute', step=1.0,
                          "'quantile', or 'components'.")
 
     # Keep only favorable levels, ascending (deepest first), spaced by min_gap.
-    raw = np.sort(np.asarray(raw, dtype=float))
-    kept = []
-    for lv in raw:
+    # Sort (level, quantile) pairs together so each kept level keeps its q.
+    pairs = sorted(zip(np.asarray(raw, dtype=float).tolist(), qs),
+                   key=lambda p: p[0])
+    kept, kept_q = [], []
+    for lv, q in pairs:
         if lv >= 0:
             continue
         if not kept or abs(lv - kept[-1]) >= min_gap:
             kept.append(float(lv))
-    return kept
+            kept_q.append(q)
+    return (kept, kept_q) if return_quantiles else kept
 
 
 _HOTSPOT_COLS = ['rank', 'label_id', 'peak_value', 'mean_value', 'persistence',
