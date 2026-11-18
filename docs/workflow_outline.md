@@ -1,4 +1,4 @@
-# Standard Workflow for Glycan FragMapping
+# Standard Workflow for Glycographer Probe Docking and Mapping
 - Generate a uniform grid of sampling coordinates within a shell superimposed onto the surface of a putative binding site:
     - Inputs:
         - Receptor structure in pdb format <receptor.pdb>
@@ -26,3 +26,6 @@
         - Visualization session files <rec_frag_vis.pse> <rec_frag_vis.vmd>
         - Isosurface coordinates <rec_frag_energymap_isolevel_n.xyz>
         - Rendered images <rec_frag_isomap_vis.png>
+
+# Standard Workflow for GlycanDock Receptor-Glycoligand Docking
+(To do: fill this out properly)
