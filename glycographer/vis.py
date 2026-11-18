@@ -54,12 +54,26 @@ def format_background(bg_rgb='white'):
     cmd.set('depth_cue', 0)
     cmd.set('ray_shadow', 0)
 
+def _obj_name(path_or_label: str, ext: str = '') -> str:
+    '''
+    PyMOL object name for a file path or label.
+
+    PyMOL rejects some characters our standard names use -- notably the {}
+    branch markers in probe names (glycographer.naming) -- and cmd.load
+    silently rewrites them to '_'. Any name we later pass back to PyMOL must
+    be the rewritten one, so derive every object name through here.
+    '''
+    stem = os.path.basename(path_or_label)
+    if ext and stem.endswith(ext):
+        stem = stem[:-len(ext)]
+    return cmd.get_legal_name(stem)
+
 @cmd.extend
 def vis_receptor(receptor_pdb: str):
     '''
     Load and display receptor as a white surface:
     '''
-    rec_name = os.path.basename(receptor_pdb).replace('.pdb', '')
+    rec_name = _obj_name(receptor_pdb, '.pdb')
     cmd.load(receptor_pdb, rec_name)
     cmd.hide('cartoon', rec_name)
     cmd.show('surface', rec_name)
@@ -72,7 +86,7 @@ def vis_grid(grid_pdb: str):
     '''
     Load and display sampling grid.
     '''
-    grid_name = os.path.basename(grid_pdb).replace('.pdb', '')
+    grid_name = _obj_name(grid_pdb, '.pdb')
     cmd.load(grid_pdb, grid_name)
 
     return grid_name
@@ -82,7 +96,7 @@ def vis_crystal_ligand(lig_pdb: str):
     '''
     Load and display known crystal glycoligand pose as licorice.
     '''
-    lig_name = os.path.basename(lig_pdb).replace('.pdb', '')
+    lig_name = _obj_name(lig_pdb, '.pdb')
     cmd.load(lig_pdb, lig_name)
     cmd.show('licorice', lig_name)
 
@@ -101,7 +115,7 @@ def load_volmap_from_dx(map_dx: str):
     Load a volume density map from a dx file and create a pymol
     object from it.
     '''
-    map_name = os.path.basename(map_dx).replace('.dx', '')
+    map_name = _obj_name(map_dx, '.dx')
     cmd.load(map_dx, map_name)
 
     return map_name
@@ -275,7 +289,7 @@ def show_hotspots(map_dx: str, top_n=15, level=None, min_voxels=3,
     df = find_hotspots(volmap, level=level, min_voxels=min_voxels,
                        min_persistence=min_persistence, top_n=top_n,
                        smooth_sigma=smooth_sigma)
-    map_name = os.path.basename(map_dx).replace('.dx', '')
+    map_name = _obj_name(map_dx, '.dx')
     if df.empty:
         print(f'No hotspots found in {map_name}.')
         return df
@@ -323,7 +337,7 @@ def show_hotspot_residues(map_dx: str, receptor_pdb: str, rank=1, radius=4.0,
                        if min_persistence not in (None, 'None', '') else None)
     smooth_sigma = float(smooth_sigma) if smooth_sigma not in (None, 'None', '') else None
 
-    rec_name = os.path.basename(receptor_pdb).replace('.pdb', '')
+    rec_name = _obj_name(receptor_pdb, '.pdb')
     if rec_name not in cmd.get_names('objects'):
         vis_receptor(receptor_pdb)
 
@@ -351,7 +365,7 @@ def show_hotspot_residues(map_dx: str, receptor_pdb: str, rank=1, radius=4.0,
         parts.append(f'(chain {chain} and {resi})' if chain else f'({resi})')
     sel = f'{rec_name} and ({" or ".join(parts)})'
 
-    sel_name = f'lining_{os.path.basename(map_dx).replace(".dx", "")}'
+    sel_name = f'lining_{_obj_name(map_dx, ".dx")}'
     cmd.select(sel_name, sel)
     cmd.show('sticks', sel_name)
     cmd.color(highlight, f'{sel_name} and elem C')
@@ -382,7 +396,7 @@ def draw_best_probe_surface(rec_name: str, best_probe_map: str, probe_labels):
     pal = probe_palette(list(probe_labels))
     color_names, values = [], []
     for i, label in enumerate(probe_labels, start=1):
-        cname = f'probe_{label}'
+        cname = _obj_name(f'probe_{label}')
         cmd.set_color(cname, list(pal[label]))
         color_names.append(cname)
         values.append(i)
@@ -500,20 +514,23 @@ def draw_probe_shells(map_source, probe_labels=None, n=3, mode='absolute',
         span = hi - lo
         lvl_range = (lo, hi + span) if span > 0 else (lo, lo + 1.0)
 
+        # The label keys the palette and the return dict as given; PyMOL
+        # object/color names use its legal form ({} -> _).
+        obj_label = _obj_name(label)
         names = []
         for i, lvl in enumerate(levels):
-            cname = f'shell_{label}_{i}'
+            cname = f'shell_{obj_label}_{i}'
             if as_mesh:
                 cmd.isomesh(cname, map_name, float(lvl))
             else:
                 cmd.isosurface(cname, map_name, float(lvl))
             rgb = color_by_magnitude(base, lvl, lvl_range, negative_is_better=True)
-            color_name = f'shellcol_{label}_{i}'
+            color_name = f'shellcol_{obj_label}_{i}'
             cmd.set_color(color_name, list(rgb))
             cmd.color(color_name, cname)
             names.append(cname)
 
-        cmd.group(f'shells_{label}', ' '.join(names))
+        cmd.group(f'shells_{obj_label}', ' '.join(names))
         all_names[label] = names
         print(f'{label}: {len(names)} shells at '
               f'{[round(l, 2) for l in levels]} (probe color {rgb_to_hex(*base)})')
