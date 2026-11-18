@@ -109,7 +109,11 @@ The default name abbreviates each residue to its lowercase PDB
 - **Branches use `{}`.** They sit where Rosetta puts `[...]`. Square brackets
   are glob characters and would silently break `glob.glob()` on any run
   directory or pose path built from the name. Braces are literal to Python's
-  glob and, with no comma inside, to bash.
+  glob and, with no comma inside, to bash. PyMOL is the one exception: it
+  does not allow `{}` in object names and replaces them with `_`, so the map
+  `tetra-man16{man13}man_..._b0p5.dx` loads as the object
+  `tetra-man16_man13_man_..._b0p5`. The `vis.py` commands account for this
+  (see [visualization_workflow.md](visualization_workflow.md)).
 - **Names are canonical.** At each branch point the largest child subtree
   continues the main chain. On a tie, the child linked at the higher-numbered
   position continues it. So the same glycan always gets the same name,

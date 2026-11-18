@@ -28,6 +28,16 @@ run ~/glycographer/glycographer/vis.py
 This registers the helper commands below (all usable directly at the PyMOL
 prompt). It also makes the analysis functions importable.
 
+> **Object names vs. file names.** Each loaded file becomes an object named
+> after the file, with any characters PyMOL doesn't allow replaced by `_`.
+> This matters for branched probes, whose names contain `{}`:
+> `tetra-man16{man13}man16man_side_1000p_boltzmann_b0p5.dx` loads as
+> `tetra-man16_man13_man16man_side_1000p_boltzmann_b0p5`. Commands that take a
+> **path** (`.dx`/`.pdb`, directories, globs) accept the brace names as they
+> are. Commands that take a **loaded object name** (`draw_mapped_surface`, the
+> object form of `get_map_stats`) need the `_` form shown in the object list.
+> From a script, the loaders return the name they actually used.
+
 ### 1a. Receptor and reference geometry
 
 ```
@@ -75,6 +85,10 @@ Color the receptor surface by a *single* continuous map — a per-probe map, or 
 load_volmap_from_dx  maps/1o7v_global_1000p_boltzmann_b0p5_consensus_min.dx      # -> object "1o7v_global_1000p_boltzmann_b0p5_consensus_min"
 draw_mapped_surface  1o7v_receptor, 1o7v_global_1000p_boltzmann_b0p5_consensus_min, map_dx=maps/1o7v_global_1000p_boltzmann_b0p5_consensus_min.dx
 ```
+
+The second argument is the **object name** that `load_volmap_from_dx`
+returns. For a branched probe that is the `_` form, not the file name with
+braces (see the note at the top of Part 1).
 
 `map_dx=` lets it auto-derive the ramp bounds `[map_min, 0]`; alternatively set
 `ramp_min=` explicitly (e.g. from `get_map_stats`). The recommended combination
