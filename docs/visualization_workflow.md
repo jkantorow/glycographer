@@ -43,7 +43,7 @@ prompt). It also makes the analysis functions importable.
 ```
 format_background white
 vis_receptor  1o7v_receptor.pdb          # loads as a white surface, returns "1o7v_receptor"
-vis_grid      1o7v_gridbox.pdb           # optional: show the sampling grid
+vis_grid      1o7v_grid_global.pdb       # optional: show the sampling grid
 vis_crystal_ligand  1o7v_ligand.pdb      # optional: SNFG-colored reference pose
 ```
 
