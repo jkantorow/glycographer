@@ -124,7 +124,9 @@ no longer a guess-and-check loop between PyMOL and the command line.
 ### Naming
 
 The grid file is `<receptor>_grid_<grid_id>.pdb`, and `<grid_id>` becomes the
-trailing field of every run_id built from it:
+trailing field of every run_id built from it. A trailing `_rec`/`_receptor` on
+the receptor filename is dropped, since it describes the file rather than the
+receptor:
 
 ```text
 1o7v_rec_grid_global.pdb   ->   1o7v-gal_global   ->   1o7v-gal_global_1000p

@@ -180,8 +180,22 @@ class Receptor:
 
     @property
     def stem(self) -> str:
-        '''Receptor basename without .pdb, used to name the grid file.'''
+        '''Receptor basename without .pdb.'''
         return os.path.basename(self.path).rsplit('.pdb', 1)[0]
+
+    @property
+    def label(self) -> str:
+        '''
+        The receptor's name as it appears in a run_id, used to name the grid
+        file. A trailing "_rec"/"_receptor" is dropped, because it describes
+        the file rather than the receptor: 1o7v_rec.pdb gives
+        1o7v_grid_global.pdb, matching the <receptor> field of the run_id
+        1o7v-gal_global.
+        '''
+        for suffix in ('_rec', '_receptor', '-rec', '-receptor'):
+            if self.stem.endswith(suffix):
+                return self.stem[:-len(suffix)]
+        return self.stem
 
     def bounds(self, margin: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
         '''Axis-aligned bounds of the atom *surfaces*, grown by `margin`.'''

@@ -241,7 +241,7 @@ def main():
 
     try:
         out_path = args.out or os.path.join(
-            args.outdir, grid_filename(receptor.stem, grid_id))
+            args.outdir, grid_filename(receptor.label, grid_id))
     except ValueError as e:
         raise SystemExit(f'error: {e}')
     if os.path.exists(out_path) and not args.overwrite and not args.dry_run:

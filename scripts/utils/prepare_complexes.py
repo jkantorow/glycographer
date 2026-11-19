@@ -22,10 +22,18 @@ MD/AMBER tooling name residues by protonation or bonding state (HIE, HID, HIP,
 CYX, ...), and losing them leaves holes in the receptor with no error raised.
 For every receptor this script:
 
-  - removes solvent and keeps only the first alternate location
+  - removes solvent (and anything matching --strip, for crystallization
+    additives such as ethylene glycol) and keeps only the first alternate
+    location
   - renames force-field residue names to standard PDB names (RESN_ALIASES).
     Rosetta re-derives what they encoded: disulfides are re-detected from
     SG-SG geometry, and the packer samples His tautomers itself
+  - converts modified residues that are a standard amino acid with one
+    substituted atom (MODIFIED_RESIDUES; selenomethionine is the common one in
+    crystal structures). Renaming the residue is not enough: Rosetta looks up
+    atoms by name, so the substituted atom is renamed and re-elemented and the
+    record switched from HETATM to ATOM. Left as HETATM, an MSE would also be
+    sorted into the hetero block, cutting the chain in two at every one
   - strips hydrogens (unless --keep-hydrogens); Rosetta rebuilds them with
     its own naming
   - sets occupancy to 1.0 (MD exports often write 0.00, which Rosetta
@@ -67,6 +75,12 @@ RESN_ALIASES = {
     'ASH': 'ASP', 'GLH': 'GLU', 'LYN': 'LYS',                  # protonation variants
 }
 
+# Modified residues that are a standard amino acid with one substituted
+# atom: resn -> (standard resn, {old atom name: (new atom name, element)}).
+MODIFIED_RESIDUES = {
+    'MSE': ('MET', {'SE': ('SD', 'S')}),       # selenomethionine (SeMet phasing)
+}
+
 PROTEIN_SEL = f'resn {"+".join(STANDARD_AA)}'
 MAX_PEPTIDE_CN = 2.0  # Angstrom; a longer C(i)-N(i+1) gap is a chain break
 
@@ -93,10 +107,14 @@ def _renumber_if_colliding(obj):
     cmd.alter(obj, 'resv = remap[(segi, chain, resi)]', space={'remap': remap})
     return [(new, *key, resns[key]) for key, new in remap.items()]
 
-def prep_receptor(receptor_pdb, keep_hydrogens=False, name=None):
+def prep_receptor(receptor_pdb, keep_hydrogens=False, name=None, strip=None):
     '''
     Load and prepare input receptor for docking. Returns the PyMOL object
     name and a dict summarizing the clean-up.
+
+    `strip` is an extra PyMOL selection to delete along with solvent, for
+    crystallization additives (ethylene glycol, glycerol, sulfate, ...) that
+    are not solvent to PyMOL but are not part of the receptor either.
     '''
     rec_name = name or os.path.basename(receptor_pdb.replace('.pdb', ''))
     if receptor_pdb is not None:
@@ -104,6 +122,9 @@ def prep_receptor(receptor_pdb, keep_hydrogens=False, name=None):
 
     report = {'solvent_removed': cmd.count_atoms(f'{rec_name} and solvent')}
     cmd.remove(f'{rec_name} and solvent')
+    if strip:
+        report['stripped'] = (strip, cmd.count_atoms(f'{rec_name} and ({strip})'))
+        cmd.remove(f'{rec_name} and ({strip})')
     _resolve_altlocs_and_occupancy(rec_name)
 
     renamed = {}
@@ -113,6 +134,22 @@ def prep_receptor(receptor_pdb, keep_hydrogens=False, name=None):
             cmd.alter(f'{rec_name} and resn {alias}', f"resn='{std}'")
             renamed[alias] = n
     report['renamed'] = renamed
+
+    modified = {}
+    for alias, (std, atom_fixes) in MODIFIED_RESIDUES.items():
+        sel = f'{rec_name} and resn {alias}'
+        n = cmd.count_atoms(f'{sel} and name CA')
+        if not n:
+            continue
+        for old_atom, (new_atom, elem) in atom_fixes.items():
+            cmd.alter(f'{sel} and name {old_atom}', f"elem='{elem}'")
+            cmd.alter(f'{sel} and name {old_atom}', f"name='{new_atom}'")
+        cmd.alter(sel, f"resn='{std}'")
+        # The residue is a standard one now, so it belongs in the ATOM
+        # records and in sequence order, not in the hetero block.
+        cmd.alter(f'{rec_name} and resn {std}', "type='ATOM'")
+        modified[alias] = n
+    report['modified'] = modified
 
     if not keep_hydrogens:
         report['hydrogens_removed'] = cmd.count_atoms(f'{rec_name} and hydro')
@@ -222,8 +259,15 @@ def print_report(label, report, n_ters, out_pdb):
     print(f'{label} -> {out_pdb}')
     if report['solvent_removed']:
         print(f'  removed {report["solvent_removed"]} solvent atoms')
+    if report.get('stripped') and report['stripped'][1]:
+        sel, n = report['stripped']
+        print(f'  removed {n} atoms matching --strip "{sel}"')
     for alias, n in report['renamed'].items():
         print(f'  renamed {n} {alias} -> {RESN_ALIASES[alias]}')
+    for alias, n in report.get('modified', {}).items():
+        std, fixes = MODIFIED_RESIDUES[alias]
+        atoms = ', '.join(f'{o}->{new}' for o, (new, _) in fixes.items())
+        print(f'  converted {n} {alias} -> {std} ({atoms})')
     if report.get('hydrogens_removed'):
         print(f'  removed {report["hydrogens_removed"]} receptor hydrogens')
     if report['resmap']:
@@ -238,12 +282,33 @@ def print_report(label, report, n_ters, out_pdb):
 def out_path(name, outprefix):
     return f'{outprefix}_{name}.pdb' if outprefix else f'{name}.pdb'
 
-def finish(complex_name, label, report, outprefix):
+def write_receptor(complex_name, out_pdb):
+    '''
+    Write the prepared receptor alone (everything but the chain-X
+    glycoligand). This is the structure to build a sampling grid from: it has
+    the same coordinates as the complex but the chain ids and residue numbers
+    the docking run will actually see, so PyMOL selections written against it
+    mean what they say. See docs/sampling_grids.md.
+    '''
+    cmd.create('_rec_only', f'{complex_name} and not chain X', zoom=0)
+    try:
+        pdbstr, _ = add_chain_break_ters(cmd.get_pdbstr('_rec_only'))
+        with open(out_pdb, 'w') as f:
+            f.write(pdbstr)
+    finally:
+        cmd.delete('_rec_only')
+    return out_pdb
+
+
+def finish(complex_name, label, report, outprefix, write_rec=False):
     out_pdb = out_path(complex_name, outprefix)
     n_ters = write_complex(complex_name, out_pdb)
     if report['resmap']:
         write_resmap(report['resmap'], out_pdb.replace('.pdb', '_resmap.csv'))
     print_report(label, report, n_ters, out_pdb)
+    if write_rec:
+        rec_pdb = write_receptor(complex_name, out_pdb.replace('.pdb', '_rec.pdb'))
+        print(f'  receptor alone -> {rec_pdb}')
 
 def main():
 
@@ -260,6 +325,10 @@ def main():
 
   # complex mode, ligand picked out of a crystal structure
   prepare_complexes.py -c 1k9i.pdb --lig-sel "chain E and resn MAN+NAG"
+
+  # a crystal complex with cryoprotectant, keeping the receptor for grid building
+  prepare_complexes.py -c 1pmh.pdb --lig-sel "chain A" --strip "resn EDO" \
+      --write-receptor
 ''')
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument('-rec', '--receptor-structures', type=str, nargs='+',
@@ -277,6 +346,13 @@ def main():
                         help='Optional prefix to append to each output complex.')
     parser.add_argument('--keep-hydrogens', action='store_true',
                         help='Keep receptor hydrogens instead of letting Rosetta rebuild them.')
+    parser.add_argument('--strip', type=str, default=None,
+                        help='Extra PyMOL selection to delete from each receptor along with '
+                             'solvent, for crystallization additives that are not solvent to '
+                             'PyMOL, e.g. --strip "resn EDO+GOL+SO4".')
+    parser.add_argument('--write-receptor', action='store_true',
+                        help='Also write the prepared receptor alone as <out>_rec.pdb. This is '
+                             'the structure to build a sampling grid from.')
 
     args = parser.parse_args()
     if args.receptor_structures and not args.glycoligand_structures:
@@ -296,21 +372,27 @@ def main():
             cmd.create(f'{name}_rec', f'{name}_in and not ({args.lig_sel})', zoom=0)
             cmd.create(f'{name}_lig', lig_sel, zoom=0)
 
-            rec_name, report = prep_receptor(None, args.keep_hydrogens, name=f'{name}_rec')
+            rec_name, report = prep_receptor(None, args.keep_hydrogens,
+                                             name=f'{name}_rec', strip=args.strip)
             gly_name = prep_glycoligand(None, name=f'{name}_lig')
             complex_name = cat_gly_to_rec(rec_name, gly_name, complex_name=name)
-            finish(complex_name, complex_pdb, report, args.outprefix)
+            finish(complex_name, complex_pdb, report, args.outprefix,
+                   write_rec=args.write_receptor)
             cmd.delete(f'{name}*')
         return 0
 
     lig_names = {lig_pdb: prep_glycoligand(lig_pdb) for lig_pdb in args.glycoligand_structures}
 
     for rec_pdb in args.receptor_structures:
-        rec_name, report = prep_receptor(rec_pdb, args.keep_hydrogens)
+        rec_name, report = prep_receptor(rec_pdb, args.keep_hydrogens,
+                                         strip=args.strip)
 
-        for lig_pdb, lig_name in lig_names.items():
+        for i, (lig_pdb, lig_name) in enumerate(lig_names.items()):
             complex_name = cat_gly_to_rec(rec_name=rec_name, gly_name=lig_name)
-            finish(complex_name, f'{rec_pdb} + {lig_pdb}', report, args.outprefix)
+            # The receptor is the same in every complex built from it, so
+            # write it once rather than once per probe.
+            finish(complex_name, f'{rec_pdb} + {lig_pdb}', report, args.outprefix,
+                   write_rec=args.write_receptor and i == 0)
             cmd.delete(complex_name)
 
     return 0
