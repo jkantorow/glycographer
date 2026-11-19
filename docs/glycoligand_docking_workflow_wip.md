@@ -1,4 +1,4 @@
-# Performing standard a standard GlycanDock protocol on a putative receptor-glycoligand complex
+# Performing a standard GlycanDock protocol on a putative receptor-glycoligand complex
 
 Here, we walk through the example of docking the glycoligand of PDB 1SL4 aligned to the known binding site of chain C of a tetrameric dc-sign carbohydrate recognition domain model.
 
