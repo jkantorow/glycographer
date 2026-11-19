@@ -11,14 +11,17 @@ requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "glycographer contributors" }]
 
-# Only the pip-installable core is declared here. Three heavyweight
+# Only the pip-installable core is declared here. Two heavyweight
 # dependencies are deliberately omitted because pip cannot supply the builds
 # this project needs:
 #
 #   pymol      -> conda-forge `pymol-open-source` (the PyPI `pymol` is a
 #                 different, unrelated package)
-#   open3d     -> conda-forge `open3d` / `open3d-cpu`
 #   pyrosetta  -> Graylab-licensed wheel, not distributed on PyPI
+#
+# open3d was a third until grid.py stopped meshing surfaces; it is no longer
+# imported anywhere and can be dropped from environment.yaml on the next
+# env rebuild (it is the one package that will not solve on Windows).
 #
 # environment.yaml remains the source of truth for a complete environment.
 # Version floors are set below what the glycographer env already has, so

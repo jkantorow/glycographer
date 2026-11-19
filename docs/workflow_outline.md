@@ -1,9 +1,10 @@
 # Standard Workflow for Glycographer Probe Docking and Mapping
-- Generate a uniform grid of sampling coordinates within a shell superimposed onto the surface of a putative binding site:
+- Generate a uniform grid of sampling coordinates within a shell superimposed onto the surface of a putative binding site (`scripts/build_sampling_grid.py`, see [sampling_grids.md](sampling_grids.md)):
     - Inputs:
-        - Receptor structure in pdb format <receptor.pdb>
+        - Prepared receptor structure in pdb format <receptor.pdb>
+        - Optionally, a PyMOL selection of the residues to sample around (`--site`), or an explicit box (`--box`); with neither, the whole surface is sampled
     - Outputs:
-        - Sampling coordinate points in xyz and pseudoatom pdb format <sampling_grid.xyz> <sampling_grid.pdb>
+        - Sampling coordinate points as pseudoatoms in pdb format <receptor_grid_<grid_id>.pdb>, plus a .json sidecar of the build parameters (and .xyz with `--write-xyz`)
 - Execute an extended-sampling grid box docking simulation between a query receptor and glycan candidates:
     - Inputs:
         - Receptor structure in pdb format <receptor.pdb>

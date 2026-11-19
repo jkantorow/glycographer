@@ -198,6 +198,13 @@ BRANCH_OPEN, BRANCH_CLOSE = '{', '}'
 # separates run_id fields) and no '.' (extensions).
 _PROBE_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9{}\-]*$')
 
+# Grid ids become the trailing field of a run_id (<receptor>-<ligand>_<grid_id>)
+# and name the grid file (<receptor>_grid_<grid_id>.pdb). Letters, digits and
+# '-' only: no '_', which separates run_id fields and would be swallowed by the
+# pose-count / map-type tags appended after it, and no braces (those belong to
+# probe names, and a grid id can end up inside a glob pattern).
+_GRID_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9-]*$')
+
 _TOKEN_RE = re.compile(r'(\(\s*\d+\s*->\s*\d+\s*\)|\[|\])')
 _LINK_RE = re.compile(r'^\(\s*(\d+)\s*->\s*(\d+)\s*\)$')
 _RESIDUE_RE = re.compile(
@@ -481,6 +488,20 @@ def validate_probe_name(name: str) -> str:
             f'only. "_" separates run_id fields (<receptor>-<ligand>_<grid_id>), '
             f'so it cannot appear in a probe name.')
     return name
+
+
+def validate_grid_id(grid_id: str) -> str:
+    '''
+    Return `grid_id` if it is usable as the grid field of a run_id, else raise
+    ValueError. 'global' is the conventional id for a grid covering the whole
+    receptor surface; name a local grid after its site ('crd', 'ca2', 'cleft').
+    '''
+    if not _GRID_ID_RE.match(grid_id or ''):
+        raise ValueError(
+            f'invalid grid id {grid_id!r}: use letters, digits and "-" only. '
+            f'"_" separates run_id fields (<receptor>-<ligand>_<grid_id>), so '
+            f'it cannot appear in a grid id.')
+    return grid_id
 
 
 def probe_names(sequences: Sequence[str],
