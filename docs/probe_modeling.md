@@ -40,7 +40,7 @@ python scripts/model_glycan_probes.py probes.iupac -o probes/ --dry-run
 ```
 
 On the cluster, submit the same arguments through the slurm wrapper. It runs
-as a single job; probes take seconds to minutes each:
+as a single job; most probes take seconds to minutes each (any probe containing sialic acid will be 10s of minutes to 1-2 hours due to its rotamers):
 
 ```bash
 sbatch scripts/slurm/model_glycan_probes.sh probes.iupac -o probes/ --manifest probes/probes.csv
